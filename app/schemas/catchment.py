@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 
@@ -6,6 +6,32 @@ class Coordinates(BaseModel):
     latitude: float
     longitude: float
     elevation: Optional[float] = None
+
+
+class GeographicExtent(BaseModel):
+    min_latitude: float
+    max_latitude: float
+    min_longitude: float
+    max_longitude: float
+
+
+class ContourLine(BaseModel):
+    id: str
+    elevation: float
+    coordinates: List[Tuple[float, float]]
+    vertex_count: int
+    name: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedContourDataset(BaseModel):
+    filename: str
+    contour_count: int
+    min_elevation: float
+    max_elevation: float
+    elevation_unit: str = "meters"
+    extent: GeographicExtent
+    contours: List[ContourLine] = Field(default_factory=list)
 
 
 class CandidatePond(BaseModel):
@@ -37,7 +63,9 @@ class ContourInspectionResponse(BaseModel):
     file_size_bytes: int
     is_valid: bool
     can_parse: bool
+    contours_processed: int
+    min_elevation: float
+    max_elevation: float
+    extent: GeographicExtent
     kml_entry_name: Optional[str] = None
-    features_count: int = 0
     message: str
-

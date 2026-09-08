@@ -29,3 +29,15 @@ class CatchmentAnalysisResponse(BaseModel):
     boundary: Optional[CatchmentBoundary] = None
     candidate_ponds: List[CandidatePond] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ContourInspectionResponse(BaseModel):
+    filename: str
+    file_type: str
+    file_size_bytes: int
+    is_valid: bool
+    can_parse: bool
+    kml_entry_name: Optional[str] = None
+    features_count: int = 0
+    message: str
+

@@ -1,15 +1,24 @@
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
-from app.schemas.catchment import CatchmentAnalysisResponse
-from app.utils.file_handler import validate_contour_extension
+from fastapi import APIRouter, File, UploadFile
+from app.schemas.catchment import ContourInspectionResponse
+from app.services.parser import ContourParserService
 
 router = APIRouter()
 
 
-@router.post("/analyzeContour", response_model=CatchmentAnalysisResponse)
-@router.post("/findCatchment", response_model=CatchmentAnalysisResponse)
-async def analyze_contour(file: UploadFile = File(...)) -> CatchmentAnalysisResponse:
-    validate_contour_extension(file.filename or "")
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Catchment analysis algorithm will be integrated in Phase 2.",
-    )
+@router.post(
+    "/findCatchment",
+    response_model=ContourInspectionResponse,
+    summary="Validate and inspect uploaded contour map",
+    description="Accepts a KML or KMZ contour map file via multipart form-data, safely inspects the archive or document structure in temporary storage, and returns validation metadata.",
+)
+@router.post(
+    "/analyzeContour",
+    response_model=ContourInspectionResponse,
+    summary="Validate and inspect uploaded contour map (alias)",
+    description="Alias endpoint for /findCatchment.",
+)
+async def find_catchment(
+    file: UploadFile = File(..., description="Contour map file (.kml or .kmz)"),
+) -> ContourInspectionResponse:
+    content = await file.read()
+    return ContourParserService.inspect_contour_file(content, file.filename or "")

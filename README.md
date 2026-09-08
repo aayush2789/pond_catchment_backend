@@ -1,6 +1,6 @@
 # AI-Based Village Pond Planning System - Backend
 
-A modular, extensible FastAPI backend service for the AI-based Village Pond Planning System. This system analyzes contour maps (in KML/KMZ formats) to model terrain, assess hydrology, detect candidate pond sites, and delineate catchment areas.
+A modular, extensible FastAPI backend service for the AI-based Village Pond Planning System. This system accepts contour maps (in KML/KMZ formats) to model terrain, assess hydrology, detect candidate pond sites, and delineate catchment areas.
 
 ## Architecture & Modular Structure
 
@@ -11,18 +11,18 @@ pond_catchment_backend/
 │   │   └── v1/
 │   │       ├── endpoints/
 │   │       │   ├── health.py        # System health and status endpoint
-│   │       │   └── catchment.py     # Contour analysis & catchment routes
+│   │       │   └── catchment.py     # Contour ingestion & catchment routes
 │   │       └── api.py               # V1 API router aggregator
 │   ├── core/
 │   │   └── config.py                # Environment-driven settings (pydantic-settings)
 │   ├── models/                      # Domain entities & future database models
 │   ├── schemas/
 │   │   ├── health.py                # Health check Pydantic schemas
-│   │   └── catchment.py             # Geospatial and catchment response schemas
+│   │   └── catchment.py             # Geospatial and inspection response schemas
 │   ├── services/
-│   │   ├── parser.py                # Service interface for KML/KMZ parsing
-│   │   ├── terrain.py               # Service interface for DEM & slope analysis
-│   │   └── hydrology.py             # Service interface for flow & catchment delineation
+│   │   ├── parser.py                # KML/KMZ parsing & validation service
+│   │   ├── terrain.py               # Interface for DEM & slope analysis
+│   │   └── hydrology.py             # Interface for flow & catchment delineation
 │   ├── utils/
 │   │   └── file_handler.py          # File format validation and file operations
 │   └── main.py                      # FastAPI application entry point & middleware
@@ -30,6 +30,7 @@ pond_catchment_backend/
 │   └── sample/                      # Directory for sample contour datasets (KML/KMZ)
 ├── tests/
 │   ├── conftest.py                  # Pytest fixtures and TestClient
+│   ├── test_catchment.py            # Contour upload, inspection, and error tests
 │   └── test_health.py               # API & health check test suite
 ├── .env.example                     # Environment configuration template
 ├── .gitignore                       # Git exclusions for Python, venv, caches, logs
@@ -41,17 +42,15 @@ pond_catchment_backend/
 
 ### 1. Environment Setup
 
-If not already created, create and activate a Python virtual environment:
+Activate the Python virtual environment:
 
 **Windows (PowerShell):**
 ```powershell
-python -m venv venv
 .\venv\Scripts\Activate.ps1
 ```
 
 **macOS / Linux:**
 ```bash
-python3 -m venv venv
 source venv/bin/activate
 ```
 
@@ -69,13 +68,6 @@ Copy the sample environment file:
 cp .env.example .env
 ```
 
-Available configuration keys in `.env`:
-- `PROJECT_NAME`: Title of the FastAPI service.
-- `API_V1_STR`: API route prefix (default: `/api/v1`).
-- `DEBUG`: Boolean flag for debug mode.
-- `HOST`: Host address (default: `0.0.0.0`).
-- `PORT`: Port number (default: `8000`).
-
 ## Running the Application
 
 Start the development server with Uvicorn:
@@ -85,35 +77,63 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Once running, access:
-- **API Root**: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
-- **Health Check**: [http://127.0.0.1:8000/api/v1/health](http://127.0.0.1:8000/api/v1/health)
 - **Interactive Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **ReDoc Documentation**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
-- **OpenAPI Schema**: [http://127.0.0.1:8000/openapi.json](http://127.0.0.1:8000/openapi.json)
+- **API Root**: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
+- **Health Check**: [http://127.0.0.1:8000/api/v1/health](http://127.0.0.1:8000/api/v1/health)
 
 ## API Endpoints
 
 | Method | Path | Description |
 | :--- | :--- | :--- |
-| `GET` | `/` | API status and links |
-| `GET` | `/health` | Direct health check |
-| `GET` | `/api/v1/health` | Versioned system health check |
-| `POST` | `/api/v1/analyzeContour` | Upload KML/KMZ contour map for catchment analysis |
-| `POST` | `/api/v1/findCatchment` | Alias for contour analysis route |
+| `GET` | `/` | API status and root information |
+| `GET` | `/api/v1/health` | Service health status |
+| `POST` | `/api/v1/findCatchment` | Upload and inspect KML/KMZ contour map (multipart form-data) |
+| `POST` | `/api/v1/analyzeContour` | Alias endpoint for `/findCatchment` |
+
+## Testing the Upload Endpoint
+
+### From Swagger UI (`/docs`)
+1. Navigate to [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) in your browser.
+2. Expand `POST /api/v1/findCatchment` under the **Catchment Analysis** tag.
+3. Click **Try it out**.
+4. Click **Choose File** and select any `.kml` or `.kmz` file.
+5. Click **Execute** to view the structured validation response.
+
+### Using `curl`
+```powershell
+curl -X POST "http://127.0.0.1:8000/api/v1/findCatchment" `
+  -H "accept: application/json" `
+  -F "file=@path/to/contours.kml"
+```
+
+### Example Response (`200 OK`)
+```json
+{
+  "filename": "contours.kml",
+  "file_type": "kml",
+  "file_size_bytes": 452,
+  "is_valid": true,
+  "can_parse": true,
+  "kml_entry_name": null,
+  "features_count": 2,
+  "message": "Contour file successfully validated and ready for terrain analysis."
+}
+```
+
+For `.kmz` archives, `kml_entry_name` displays the extracted internal KML document name found dynamically within the archive.
 
 ## Running Tests
 
-Run the test suite with pytest:
+Execute the automated test suite:
 
 ```powershell
 pytest tests/ -v
 ```
 
-## Extensibility for Subsequent Phases
+## Security & Temporary Storage Handling
 
-The architecture separates responsibilities to support upcoming computational phases without refactoring:
-
-1. **Parser Layer (`app/services/parser.py`)**: Accepts uploaded KML/KMZ files, extracts 3D contour lines and elevation geometries into structured GeoJSON/shapely features.
-2. **Terrain Layer (`app/services/terrain.py`)**: Interpolates contour data into a regular grid Digital Elevation Model (DEM) and derives slope gradients.
-3. **Hydrology Layer (`app/services/hydrology.py`)**: Calculates D8 flow direction and accumulation matrices, scores depression candidates for pond siting, and delineates catchment boundaries.
-4. **API Layer (`app/api/v1/endpoints/catchment.py`)**: Ingests files through multipart upload, orchestrates pipeline services, and serializes responses against `CatchmentAnalysisResponse`.
+- Uploaded files are processed using isolated temporary storage via Python's `tempfile.TemporaryDirectory`.
+- No uploaded files are permanently retained on disk.
+- KMZ archives are scanned and extracted dynamically without hardcoding internal paths.
+- Malformed XML syntax, missing `.kml` contents inside KMZ archives, non-KML XML documents, empty uploads, and unsupported extensions are rejected gracefully with standard HTTP 400 status codes.

@@ -1,8 +1,12 @@
-# AI-Based Village Pond Planning System - Backend
+# AI-Based Village Pond Planning System - Backend (Assignment 1 Phase 2)
 
-A modular, extensible FastAPI backend service for the AI-based Village Pond Planning System. This system accepts contour maps (in KML/KMZ formats) to model terrain, compute terrain slope, detect promising candidate pond regions, and prepare for catchment delineation.
+A modular, extensible FastAPI backend service for the AI-based Village Pond Planning System. This system processes village contour maps (uploaded in KML or KMZ formats) to dynamically reconstruct continuous digital elevation models (DEM), model surface slopes, identify promising candidate pond regions using explainable terrain criteria, simulate hydrological drainage via D8 flow modeling, and delineate upstream catchment boundaries and metric drainage areas formatted as GeoJSON.
+
+---
 
 ## Architecture & Modular Structure
+
+The backend follows clean architectural principles where the API route layer orchestrates dedicated, single-responsibility services. Every result is derived dynamically from input files without hard-coded coordinates, elevation values, bounds, or areas.
 
 ```text
 pond_catchment_backend/
@@ -10,41 +14,46 @@ pond_catchment_backend/
 │   ├── api/
 │   │   └── v1/
 │   │       ├── endpoints/
-│   │       │   ├── health.py             # System health and status endpoint
-│   │       │   └── catchment.py          # Contour ingestion, terrain, & candidate routes
+│   │       │   ├── health.py             # System liveness and health check endpoint
+│   │       │   └── catchment.py          # Route orchestrator for /findCatchment & /analyzeContour
 │   │       └── api.py                    # V1 API router aggregator
 │   ├── core/
 │   │   └── config.py                     # Environment-driven settings (pydantic-settings)
-│   ├── models/                           # Domain entities & future database models
+│   ├── models/                           # Domain models & database entity schemas
 │   ├── schemas/
-│   │   ├── health.py                     # Health check Pydantic schemas
-│   │   └── catchment.py                  # Geospatial, contour, terrain, and candidate schemas
+│   │   ├── health.py                     # Health check schemas
+│   │   └── catchment.py                  # Pydantic schemas: Contours, DEM, Candidates, Catchment, GeoJSON
 │   ├── services/
-│   │   ├── parser.py                     # KML/KMZ normalization & validation service
-│   │   ├── terrain.py                    # Terrain reconstruction (DEM, UTM, & slope) service
-│   │   ├── candidate_selection.py        # Explainable multi-factor candidate scoring service
-│   │   └── hydrology.py                  # Interface for future flow & catchment delineation
+│   │   ├── parser.py                     # KML/KMZ unpacking, XML parsing, & contour normalization
+│   │   ├── terrain.py                    # Dynamic UTM projection, DEM interpolation, & slope calculation
+│   │   ├── candidate_selection.py        # Explainable multi-factor candidate pond siting & ranking
+│   │   └── hydrology.py                  # Priority-Flood sink filling, D8 flow, snapping, & catchment delineation
 │   ├── utils/
-│   │   └── file_handler.py               # File format validation and file operations
-│   └── main.py                           # FastAPI application entry point & middleware
+│   │   └── file_handler.py               # File extension & archive validation utilities
+│   └── main.py                           # FastAPI application entry point, CORS, & routers
 ├── data/
-│   └── sample/                           # Sample contour datasets (KML/KMZ)
-│       └── contours_1m.kml
+│   └── sample/                           # Sample contour datasets
+│       └── contours_1m.kml               # 1,355 contour lines (1m interval, 267m - 298m elevation)
 ├── tests/
-│   ├── conftest.py                       # Pytest fixtures and TestClient
-│   ├── test_catchment.py                 # Full unit & integration test suite
-│   └── test_health.py                    # API & health check test suite
+│   ├── conftest.py                       # Pytest fixtures and TestClient configuration
+│   ├── test_catchment.py                 # Full unit & end-to-end integration test suite
+│   └── test_health.py                    # Health & status test suite
 ├── .env.example                          # Environment configuration template
 ├── .gitignore                            # Git exclusions for Python, venv, caches, logs
-├── README.md                             # Documentation & setup guide
-└── requirements.txt                      # Project dependencies
+├── README.md                             # Comprehensive technical documentation
+└── requirements.txt                      # Production dependencies
 ```
 
-## Setup Instructions
+---
 
-### 1. Environment Setup
+## Setup & Installation
 
-Activate the Python virtual environment:
+### 1. Prerequisites
+- Python 3.10+ (tested on Python 3.12.3)
+- PowerShell (Windows) or Bash (macOS/Linux)
+
+### 2. Environment Activation
+Activate the existing virtual environment:
 
 **Windows (PowerShell):**
 ```powershell
@@ -56,19 +65,18 @@ Activate the Python virtual environment:
 source venv/bin/activate
 ```
 
-### 2. Install Dependencies
-
+### 3. Install Dependencies
 ```powershell
 pip install -r requirements.txt
 ```
 
-### 3. Environment Configuration
-
-Copy the sample environment file:
-
+### 4. Configuration
+Copy the environment template:
 ```powershell
 cp .env.example .env
 ```
+
+---
 
 ## Running the Application
 
@@ -78,37 +86,92 @@ Start the development server with Uvicorn:
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Once running, access:
-- **Interactive Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+Once running:
+- **Interactive Swagger Documentation**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **ReDoc Documentation**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
-- **API Root**: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
+- **Root Service Status**: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
 - **Health Check**: [http://127.0.0.1:8000/api/v1/health](http://127.0.0.1:8000/api/v1/health)
 
-## API Endpoints
+---
 
-| Method | Path | Description |
-| :--- | :--- | :--- |
-| `GET` | `/` | API status and root information |
-| `GET` | `/api/v1/health` | Service health status |
-| `POST` | `/api/v1/findCatchment` | Upload contour map, reconstruct terrain, calculate slope, identify candidate pond sites, and delineate upstream catchment |
-| `POST` | `/api/v1/analyzeContour` | Alias endpoint for `/findCatchment` |
+## API Specification
 
-## Testing the Catchment Delineation Endpoint
+### Endpoints
 
-### From Swagger UI (`/docs`)
-1. Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
-2. Expand `POST /api/v1/findCatchment` under the **Catchment Analysis** tag.
-3. Click **Try it out**.
-4. Choose a `.kml` or `.kmz` contour map file (e.g. `data/sample/contours_1m.kml`).
-5. Click **Execute** to view candidate sites and delineated upstream catchment boundary.
+| Method | Path | Summary | Description |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/` | Root Information | Returns backend service status and API version |
+| `GET` | `/api/v1/health` | Health Check | System liveness probe |
+| `POST` | `/api/v1/findCatchment` | Find Catchment & Siting | Upload contour map, analyze terrain, site pond, & delineate upstream catchment |
+| `POST` | `/api/v1/analyzeContour` | Analyze Contour (Alias) | Identical alias for `/findCatchment` |
 
-### Using `curl`
-```powershell
-curl.exe -X POST "http://127.0.0.1:8000/api/v1/findCatchment" `
-  -F "file=@contours_1m.kml"
+### Request Format
+- **Content-Type**: `multipart/form-data`
+- **Parameter**: `file` (Binary file, extension `.kml` or `.kmz`)
+
+---
+
+## Processing Methodology
+
+The end-to-end workflow executed by `POST /findCatchment` follows sequential modular stages:
+
+```mermaid
+flowchart TD
+    A[Upload KML / KMZ] --> B[File Extraction & Validation]
+    B --> C[Contour Parsing & Normalization]
+    C --> D[UTM Projection & DEM Interpolation]
+    D --> E[Slope Gradient Calculation]
+    E --> F[Explainable Candidate Pond Siting]
+    D --> G[Priority-Flood DEM Conditioning]
+    G --> H[D8 Flow Direction & Accumulation]
+    F --> I[Pour-Point Drainage Snapping]
+    H --> I
+    I --> J[Upstream Catchment BFS Traversal]
+    J --> K[Metric Area & GeoJSON Polygonization]
 ```
 
-### Example Response (`200 OK`)
+1. **File Extraction & Validation (`app/utils/file_handler.py`, `app/services/parser.py`)**:
+   - Validates file extensions (`.kml`, `.kmz`).
+   - Safely unzips KMZ archives in temporary directories to discover nested `.kml` payload files without assuming hard-coded paths.
+   - Enforces checks against empty files, corrupted archives, and invalid XML.
+
+2. **Contour Extraction & Normalization (`ContourParserService.parse_and_normalize_kml`)**:
+   - Extracts coordinates from `LineString`, `Polygon`, or `MultiGeometry` elements.
+   - Discovers elevation values across multiple standard KML attributes: `SimpleData` / `Data` tags (`ELEVATION`, `contour`, `z`), Placemark `<name>`, `<description>`, or 3D coordinate triples.
+   - Discards degenerate single-point lines and validates that at least two distinct elevation levels exist.
+
+3. **Continuous Terrain Interpolation (`TerrainService.reconstruct_terrain`)**:
+   - Computes the center longitude/latitude to dynamically project coordinates into the appropriate Universal Transverse Mercator (UTM) zone (e.g. `EPSG:32644` for Central India).
+   - Generates a regular 2D metric grid (default resolution: $10\text{ m}$) across the bounding box.
+   - Dynamically adapts grid resolution if the input extent exceeds 500 cells in any dimension to guard against memory exhaustion.
+   - Interpolates elevations using Delaunay triangulation / linear barycentric interpolation (`scipy.interpolate.griddata`) with nearest-neighbor extrapolation along boundary edges.
+
+4. **Terrain Slope Modeling (`TerrainService.calculate_slope`)**:
+   - Calculates 2D spatial gradients ($\partial Z / \partial x$, $\partial Z / \partial y$) using central finite differences.
+   - Computes surface slope in degrees: $\theta = \arctan(\sqrt{(\partial Z / \partial x)^2 + (\partial Z / \partial y)^2}) \times \frac{180}{\pi}$.
+
+5. **Explainable Candidate Pond Siting (`CandidateSelectionService.identify_candidates`)**:
+   - Evaluates terrain cells using a multi-criteria scoring model with configurable weights (`slope_weight = 0.5`, `elevation_weight = 0.5`):
+     - **Slope Suitability ($S_{\text{slope}}$)**: Ideal $\le 3^\circ$, linear penalty up to $12^\circ$.
+     - **Elevation Suitability ($S_{\text{elevation}}$)**: Relative position in local depression/valley.
+     - **Optional Flow Suitability ($S_{\text{flow}}$)**: Ingests flow accumulation if enabled.
+   - Retains granular factor scores for transparent auditing.
+   - Applies spatial Non-Maximum Suppression (NMS) with a minimum distance threshold ($150\text{ m}$) and boundary buffering to guarantee candidate sites represent distinct, physically separated village pond regions.
+
+6. **Hydrological Drainage & Catchment Delineation (`HydrologyService.analyze_hydrology`)**:
+   - **DEM Conditioning (`condition_dem`)**: Applies Priority-Flood depression filling using a priority queue (`heapq`) to eliminate artificial pits and ensure monotonic drainage towards the raster edges.
+   - **D8 Flow Direction (`calculate_flow_direction`)**: Evaluates steepest downward descent drop across all 8 cardinal and diagonal neighbors with distance normalization ($\Delta z / d$).
+   - **Flow Accumulation (`calculate_flow_accumulation`)**: Computes upstream contributing area matrix via topological sorting by descending elevation.
+   - **Pour-Point Snapping (`snap_to_drainage_cell`)**: Snaps the selected candidate pond coordinate to the local stream channel (highest flow accumulation cell within a $100\text{ m}$ radius) with distance tie-breaking.
+   - **Catchment Delineation (`delineate_catchment`)**: Reconstructs upstream contributing terrain using Breadth-First Search (BFS) reverse flow graph traversal from the snapped outlet.
+   - **Metric Area & Polygonization (`polygonize_catchment`)**: Aggregates contributing cells into metric polygons using Shapely `box`, unions them via `unary_union`, transforms the boundary back to WGS84 `(longitude, latitude)`, and exports as a standard GeoJSON Feature polygon.
+   - **Area Calculation**: Area is accurately computed in projected metric units:
+     $$\text{Area } (m^2) = N_{\text{cells}} \times \text{resolution}^2, \quad \text{Area } (\text{ha}) = \frac{\text{Area } (m^2)}{10,000}$$
+
+---
+
+## Example API Response (`200 OK`)
+
 ```json
 {
   "filename": "contours_1m.kml",
@@ -172,7 +235,11 @@ curl.exe -X POST "http://127.0.0.1:8000/api/v1/findCatchment" `
     "longitude": 81.2899562,
     "elevation": 267.0,
     "slope_degrees": 2.8,
-    "suitability_score": 1.0
+    "suitability_score": 1.0,
+    "factor_scores": {
+      "slope_score": 1.0,
+      "elevation_score": 1.0
+    }
   },
   "catchment": {
     "outlet_location": {
@@ -219,20 +286,54 @@ curl.exe -X POST "http://127.0.0.1:8000/api/v1/findCatchment" `
 }
 ```
 
-## Running Tests
+---
 
-Execute the automated test suite:
+## Assumptions & Limitations
+
+1. **Surface Topography Only**: Hydrological modeling assumes overland gravity-driven surface runoff based solely on the reconstructed elevation model. It does not account for sub-surface infiltration, groundwater tables, evaporation rates, or subterranean pipe networks.
+2. **Artificial Obstructions**: Existing man-made culverts, road bridges, ditches, or embankments not captured in the contour elevation data are not represented in the raster surface.
+3. **Linear DEM Interpolation**: Interpolation between contour lines utilizes linear barycentric interpolation over Delaunay triangles, which represents natural terrain well but may smooth sharp breaklines or micro-topographic features.
+4. **Preliminary Nature**: This backend is designed for macro-level preliminary siting and planning.
+
+---
+
+## Important Engineering Disclaimer
+
+> [!WARNING]
+> **Preliminary Planning Tool Only**: The results provided by this system—including candidate pond locations, suitability scores, and estimated catchment areas—are preliminary terrain-based planning estimates. They are **NOT** a substitute for certified field land surveys, geotechnical soil borings, hydraulic engineering designs, or official legal land-ownership verification. Detailed ground-truthing and formal engineering studies are required prior to any construction or excavation.
+
+---
+
+## Verification & Testing
+
+The repository contains automated unit and integration tests covering the complete pipeline:
 
 ```powershell
 pytest tests/ -v
 ```
 
-## Hydrological Analysis & Catchment Delineation Details
+### Key Test Categories
+- **File Ingestion & Archive Extraction**: Valid KML, valid KMZ archives, malformed archives, missing uploads, unsupported file formats (`.txt`, `.shp`).
+- **Contour Normalization**: KML `<ExtendedData>`, `<SchemaData>`, 3D coordinate triples, description parsing, missing elevations, degenerate lines.
+- **Dynamic Terrain Modeling**: Dynamic spatial bound resolution, grid resolution scaling, slope angle accuracy against analytical test planes.
+- **Multi-Factor Candidate Siting**: Weight sensitivity testing, spatial non-maximum suppression (NMS) verification.
+- **Hydrological D8 Analysis**: Priority-Flood pit filling, flow direction downhill routing, flow accumulation monotonicity, drainage snapping with distance tie-breaking.
+- **Dynamic Input Variance**: Proves that varying input contour terrain produces strictly different candidate locations, snapped outlets, and catchment boundaries.
+- **End-to-End Integration**: Validates end-to-end execution against the sample dataset `data/sample/contours_1m.kml`.
 
-- **DEM Conditioning (`HydrologyService.condition_dem`)**: Priority-Flood algorithm fills artificial sinks and depressions, guaranteeing continuous downhill drainage across the terrain raster.
-- **D8 Flow Direction (`HydrologyService.calculate_flow_direction`)**: Evaluates the steepest descent drop $(z_i - z_n) / d$ among all 8 adjacent neighbors (accounting for diagonal distance $\sqrt{2}$).
-- **Flow Accumulation (`HydrologyService.calculate_flow_accumulation`)**: Computes upstream contributing area matrix via elevation-sorted topological routing.
-- **Pour-Point Snapping (`HydrologyService.snap_to_drainage_cell`)**: Snaps candidate pond locations to the nearest high-accumulation drainage channel within a configurable search radius (default: $100\text{ m}$) using distance-weighted tie-breaking.
-- **Catchment Delineation (`HydrologyService.delineate_catchment`)**: Reconstructs upstream contributing cells using reverse flow BFS graph traversal.
-- **Polygonization & Transformation (`HydrologyService.polygonize_catchment`)**: Converts contributing grid cells to a unified geometric polygon via Shapely, simplifies boundary artifacts, and transforms UTM coordinates back to standard WGS84 `(longitude, latitude)` GeoJSON.
-- **Metric Calculations**: Catchment area is accurately computed directly in projected metric units ($m^2$ and hectares: $10,000\text{ m}^2 = 1\text{ ha}$).
+---
+
+## Demonstration Using Provided Sample File
+
+### Using `curl` (PowerShell)
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/api/v1/findCatchment" `
+  -F "file=@data/sample/contours_1m.kml"
+```
+
+### Using Swagger UI
+1. Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+2. Expand `POST /api/v1/findCatchment`.
+3. Click **Try it out**.
+4. Choose `data/sample/contours_1m.kml`.
+5. Click **Execute** to view the parsed contours, reconstructed terrain metadata, candidate rankings, and the GeoJSON catchment polygon.

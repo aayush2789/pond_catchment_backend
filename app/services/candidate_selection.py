@@ -47,11 +47,19 @@ class CandidateSelectionService:
         else:
             elevation_score = np.ones_like(dem)
 
-        total_weight = cfg.slope_weight + cfg.elevation_weight + (cfg.flow_weight if flow_accumulation is not None else 0.0)
+        flow_score = None
+        if flow_accumulation is not None and cfg.flow_weight > 0.0:
+            max_flow = float(np.max(flow_accumulation))
+            flow_score = flow_accumulation / max_flow if max_flow > 0 else np.zeros_like(dem)
+
+        total_weight = cfg.slope_weight + cfg.elevation_weight + (cfg.flow_weight if flow_score is not None else 0.0)
         if total_weight <= 0:
             total_weight = 1.0
 
-        composite = (cfg.slope_weight * slope_score + cfg.elevation_weight * elevation_score) / total_weight
+        numerator = cfg.slope_weight * slope_score + cfg.elevation_weight * elevation_score
+        if flow_score is not None:
+            numerator += cfg.flow_weight * flow_score
+        composite = numerator / total_weight
 
         work_grid = composite.copy()
         buf = max(1, cfg.boundary_buffer_cells)
@@ -83,6 +91,8 @@ class CandidateSelectionService:
                 "slope_score": round(float(slope_score[r, c]), 4),
                 "elevation_score": round(float(elevation_score[r, c]), 4),
             }
+            if flow_score is not None:
+                factor_scores["flow_score"] = round(float(flow_score[r, c]), 4)
 
             candidates.append(
                 PondCandidateSite(

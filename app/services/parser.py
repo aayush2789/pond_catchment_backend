@@ -197,7 +197,7 @@ class ContourParserService:
         )
 
     @classmethod
-    def inspect_contour_file(cls, file_content: bytes, filename: str) -> ContourInspectionResponse:
+    def extract_kml_payload(cls, file_content: bytes, filename: str) -> Tuple[bytes, Optional[str], str]:
         ext = validate_contour_extension(filename)
         if not file_content:
             raise HTTPException(
@@ -205,14 +205,11 @@ class ContourParserService:
                 detail="Uploaded file is empty.",
             )
 
-        kml_bytes: bytes
-        kml_entry_name: Optional[str] = None
+        if ext == ".kmz":
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir) / filename
+                temp_path.write_bytes(file_content)
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir) / filename
-            temp_path.write_bytes(file_content)
-
-            if ext == ".kmz":
                 if not zipfile.is_zipfile(temp_path):
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
@@ -236,16 +233,20 @@ class ContourParserService:
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Malformed or corrupted KMZ archive.",
                     )
-            else:
-                kml_bytes = file_content
+            return kml_bytes, kml_entry_name, ext
 
-            dataset = cls.parse_and_normalize_kml(kml_bytes, filename)
-            terrain_model = TerrainService.reconstruct_terrain(dataset)
-            candidate_sites = CandidateSelectionService.identify_candidates(terrain_model)
-            selected_pond = candidate_sites[0] if candidate_sites else None
-            catchment_result = None
-            if selected_pond is not None:
-                catchment_result = HydrologyService.analyze_hydrology(terrain_model, selected_pond)
+        return file_content, None, ext
+
+    @classmethod
+    def inspect_contour_file(cls, file_content: bytes, filename: str) -> ContourInspectionResponse:
+        kml_bytes, kml_entry_name, ext = cls.extract_kml_payload(file_content, filename)
+        dataset = cls.parse_and_normalize_kml(kml_bytes, filename)
+        terrain_model = TerrainService.reconstruct_terrain(dataset)
+        candidate_sites = CandidateSelectionService.identify_candidates(terrain_model)
+        selected_pond = candidate_sites[0] if candidate_sites else None
+        catchment_result = None
+        if selected_pond is not None:
+            catchment_result = HydrologyService.analyze_hydrology(terrain_model, selected_pond)
 
         return ContourInspectionResponse(
             filename=filename,

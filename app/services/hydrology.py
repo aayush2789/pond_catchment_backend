@@ -205,6 +205,12 @@ class HydrologyService:
         ]
 
         poly_proj = unary_union(boxes)
+        if poly_proj.is_empty or poly_proj.area <= 0.0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unable to delineate catchment: resulting catchment boundary geometry is empty or invalid.",
+            )
+
         if poly_proj.geom_type == "MultiPolygon":
             poly_proj = max(poly_proj.geoms, key=lambda g: g.area)
 

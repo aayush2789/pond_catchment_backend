@@ -618,4 +618,67 @@ def test_hydrology_candidate_outside_bounds_raises_400():
     assert exc_info.value.status_code == 400
 
 
+def test_dynamic_catchment_delineation_changes_with_terrain():
+    from app.schemas.catchment import ContourLine, GeographicExtent, NormalizedContourDataset
+    from app.services.candidate_selection import CandidateSelectionService
+    from app.services.hydrology import HydrologyService
+    from app.services.terrain import TerrainService
+
+    dataset_a = NormalizedContourDataset(
+        filename="terrain_a.kml",
+        contour_count=3,
+        min_elevation=100.0,
+        max_elevation=120.0,
+        extent=GeographicExtent(min_latitude=15.000, max_latitude=15.005, min_longitude=75.000, max_longitude=75.005),
+        contours=[
+            ContourLine(id="1", elevation=100.0, coordinates=[(75.000, 15.000), (75.005, 15.000)], vertex_count=2),
+            ContourLine(id="2", elevation=110.0, coordinates=[(75.000, 15.0025), (75.005, 15.0025)], vertex_count=2),
+            ContourLine(id="3", elevation=120.0, coordinates=[(75.000, 15.005), (75.005, 15.005)], vertex_count=2),
+        ],
+    )
+
+    dataset_b = NormalizedContourDataset(
+        filename="terrain_b.kml",
+        contour_count=3,
+        min_elevation=200.0,
+        max_elevation=230.0,
+        extent=GeographicExtent(min_latitude=25.000, max_latitude=25.005, min_longitude=85.000, max_longitude=85.005),
+        contours=[
+            ContourLine(id="1", elevation=230.0, coordinates=[(85.000, 25.000), (85.005, 25.000)], vertex_count=2),
+            ContourLine(id="2", elevation=215.0, coordinates=[(85.000, 25.0025), (85.005, 25.0025)], vertex_count=2),
+            ContourLine(id="3", elevation=200.0, coordinates=[(85.000, 25.005), (85.005, 25.005)], vertex_count=2),
+        ],
+    )
+
+    terrain_a = TerrainService.reconstruct_terrain(dataset_a, resolution_meters=20.0)
+    terrain_b = TerrainService.reconstruct_terrain(dataset_b, resolution_meters=20.0)
+
+    cand_a = CandidateSelectionService.identify_candidates(terrain_a)[0]
+    cand_b = CandidateSelectionService.identify_candidates(terrain_b)[0]
+
+    catchment_a = HydrologyService.analyze_hydrology(terrain_a, cand_a)
+    catchment_b = HydrologyService.analyze_hydrology(terrain_b, cand_b)
+
+    assert catchment_a.snapped_outlet.latitude != catchment_b.snapped_outlet.latitude
+    assert catchment_a.snapped_outlet.longitude != catchment_b.snapped_outlet.longitude
+    assert catchment_a.elevation_meters != catchment_b.elevation_meters
+    assert catchment_a.boundary.geometry["coordinates"] != catchment_b.boundary.geometry["coordinates"]
+    assert catchment_a.catchment_area_sq_meters > 0.0
+    assert catchment_b.catchment_area_sq_meters > 0.0
+
+
+def test_hydrology_empty_mask_raises_400():
+    import numpy as np
+    import pytest
+    from fastapi import HTTPException
+    from app.services.hydrology import HydrologyService
+
+    empty_mask = np.zeros((10, 10), dtype=bool)
+    with pytest.raises(HTTPException) as exc:
+        HydrologyService.polygonize_catchment(empty_mask, (0.0, 100.0, 0.0, 100.0), 10.0, "EPSG:32644")
+    assert exc.value.status_code == 400
+    assert "no contributing cells found" in exc.value.detail
+
+
+
 

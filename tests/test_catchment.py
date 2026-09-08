@@ -80,6 +80,23 @@ def test_find_catchment_real_sample_file(client):
     assert terrain["projected_bounds"]["min_x"] < terrain["projected_bounds"]["max_x"]
     assert terrain["projected_bounds"]["min_y"] < terrain["projected_bounds"]["max_y"]
 
+    assert terrain["slope"] is not None
+    assert terrain["slope"]["min_slope_degrees"] >= 0.0
+    assert terrain["slope"]["max_slope_degrees"] >= terrain["slope"]["min_slope_degrees"]
+
+    assert "candidate_sites" in data
+    assert len(data["candidate_sites"]) > 0
+    top_candidate = data["candidate_sites"][0]
+    assert 0.0 <= top_candidate["suitability_score"] <= 1.0
+    assert top_candidate["rank"] == 1
+    assert data["extent"]["min_latitude"] <= top_candidate["latitude"] <= data["extent"]["max_latitude"]
+    assert data["extent"]["min_longitude"] <= top_candidate["longitude"] <= data["extent"]["max_longitude"]
+    assert top_candidate["elevation"] >= 267.0
+    assert "factor_scores" in top_candidate
+    assert "slope_score" in top_candidate["factor_scores"]
+    assert "elevation_score" in top_candidate["factor_scores"]
+
+
 
 
 def test_find_catchment_valid_kmz(client):
@@ -369,4 +386,95 @@ def test_terrain_service_insufficient_points():
     with pytest.raises(HTTPException) as exc_info:
         TerrainService.reconstruct_terrain(dataset_empty)
     assert exc_info.value.status_code == 400
+
+
+def test_terrain_service_calculate_slope():
+    import numpy as np
+    from app.services.terrain import TerrainService
+
+    # 45-degree slope: rise = run (dz = 10m over dx = 10m)
+    x = np.arange(0, 50, 10)
+    grid = np.tile(x, (5, 1)).astype(np.float64)
+    slope = TerrainService.calculate_slope(grid, resolution_meters=10.0)
+
+    # Interior cells have gradient = 1.0 -> arctan(1.0) = 45 degrees
+    assert np.isclose(slope[2, 2], 45.0, atol=1e-1)
+
+
+def test_candidate_selection_explainability_and_scoring():
+    from app.services.candidate_selection import CandidateScoringConfig, CandidateSelectionService
+    from app.services.parser import ContourParserService
+    from app.services.terrain import TerrainService
+
+    sample_path = Path("data/sample/contours_1m.kml")
+    if not sample_path.exists():
+        sample_path = Path("contours_1m.kml")
+
+    with open(sample_path, "rb") as f:
+        dataset = ContourParserService.parse_and_normalize_kml(f.read(), "contours_1m.kml")
+
+    terrain = TerrainService.reconstruct_terrain(dataset, resolution_meters=15.0)
+
+    # Test with default config
+    candidates = CandidateSelectionService.identify_candidates(terrain)
+    assert len(candidates) > 0
+    top = candidates[0]
+    assert top.rank == 1
+    assert 0.0 <= top.suitability_score <= 1.0
+    assert "slope_score" in top.factor_scores
+    assert "elevation_score" in top.factor_scores
+
+    # Test configurable weights override
+    slope_focused_cfg = CandidateScoringConfig(slope_weight=1.0, elevation_weight=0.0, top_k=3)
+    elev_focused_cfg = CandidateScoringConfig(slope_weight=0.0, elevation_weight=1.0, top_k=3)
+
+    c_slope = CandidateSelectionService.identify_candidates(terrain, config=slope_focused_cfg)
+    c_elev = CandidateSelectionService.identify_candidates(terrain, config=elev_focused_cfg)
+
+    assert len(c_slope) == 3
+    assert len(c_elev) == 3
+    # Changing weights changes suitability scores
+    assert c_slope[0].suitability_score == c_slope[0].factor_scores["slope_score"]
+    assert c_elev[0].suitability_score == c_elev[0].factor_scores["elevation_score"]
+
+
+def test_candidate_selection_dynamic_locations():
+    from app.schemas.catchment import ContourLine, GeographicExtent, NormalizedContourDataset
+    from app.services.candidate_selection import CandidateSelectionService
+    from app.services.terrain import TerrainService
+
+    dataset_1 = NormalizedContourDataset(
+        filename="d1.kml",
+        contour_count=2,
+        min_elevation=100.0,
+        max_elevation=120.0,
+        extent=GeographicExtent(min_latitude=15.0, max_latitude=15.02, min_longitude=75.0, max_longitude=75.02),
+        contours=[
+            ContourLine(id="1", elevation=100.0, coordinates=[(75.0, 15.0), (75.02, 15.0)], vertex_count=2),
+            ContourLine(id="2", elevation=120.0, coordinates=[(75.0, 15.02), (75.02, 15.02)], vertex_count=2),
+        ],
+    )
+
+    dataset_2 = NormalizedContourDataset(
+        filename="d2.kml",
+        contour_count=2,
+        min_elevation=250.0,
+        max_elevation=270.0,
+        extent=GeographicExtent(min_latitude=25.0, max_latitude=25.02, min_longitude=85.0, max_longitude=85.02),
+        contours=[
+            ContourLine(id="1", elevation=250.0, coordinates=[(85.0, 25.0), (85.02, 25.0)], vertex_count=2),
+            ContourLine(id="2", elevation=270.0, coordinates=[(85.0, 25.02), (85.02, 25.02)], vertex_count=2),
+        ],
+    )
+
+    terrain_1 = TerrainService.reconstruct_terrain(dataset_1, resolution_meters=50.0)
+    terrain_2 = TerrainService.reconstruct_terrain(dataset_2, resolution_meters=50.0)
+
+    cand_1 = CandidateSelectionService.identify_candidates(terrain_1)
+    cand_2 = CandidateSelectionService.identify_candidates(terrain_2)
+
+    assert len(cand_1) > 0 and len(cand_2) > 0
+    assert cand_1[0].latitude != cand_2[0].latitude
+    assert cand_1[0].longitude != cand_2[0].longitude
+
 

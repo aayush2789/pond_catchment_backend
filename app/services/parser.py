@@ -11,8 +11,10 @@ from app.schemas.catchment import (
     GeographicExtent,
     NormalizedContourDataset,
 )
+from app.services.candidate_selection import CandidateSelectionService
 from app.services.terrain import TerrainService
 from app.utils.file_handler import validate_contour_extension
+
 
 
 VALID_KML_ROOT_TAGS = {"kml", "document", "folder"}
@@ -237,6 +239,7 @@ class ContourParserService:
 
             dataset = cls.parse_and_normalize_kml(kml_bytes, filename)
             terrain_model = TerrainService.reconstruct_terrain(dataset)
+            candidate_sites = CandidateSelectionService.identify_candidates(terrain_model)
 
         return ContourInspectionResponse(
             filename=filename,
@@ -250,6 +253,8 @@ class ContourParserService:
             extent=dataset.extent,
             kml_entry_name=kml_entry_name,
             terrain=terrain_model.to_metadata(),
-            message="Contour file successfully validated, normalized, and reconstructed into terrain surface.",
+            candidate_sites=candidate_sites,
+            message="Contour file successfully validated, normalized, reconstructed, and evaluated for candidate pond sites.",
         )
+
 

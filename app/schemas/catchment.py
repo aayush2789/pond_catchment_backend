@@ -22,6 +22,12 @@ class ProjectedBounds(BaseModel):
     max_y: float
 
 
+class SlopeMetadata(BaseModel):
+    min_slope_degrees: float
+    max_slope_degrees: float
+    mean_slope_degrees: float
+
+
 class ContourLine(BaseModel):
     id: str
     elevation: float
@@ -50,6 +56,18 @@ class TerrainMetadata(BaseModel):
     max_elevation: float
     projected_bounds: ProjectedBounds
     geographic_extent: GeographicExtent
+    slope: Optional[SlopeMetadata] = None
+
+
+class PondCandidateSite(BaseModel):
+    id: str
+    rank: int
+    latitude: float
+    longitude: float
+    elevation: float
+    slope_degrees: float
+    suitability_score: float = Field(ge=0.0, le=1.0)
+    factor_scores: Dict[str, float] = Field(default_factory=dict)
 
 
 class CandidatePond(BaseModel):
@@ -87,4 +105,5 @@ class ContourInspectionResponse(BaseModel):
     extent: GeographicExtent
     kml_entry_name: Optional[str] = None
     terrain: Optional[TerrainMetadata] = None
+    candidate_sites: List[PondCandidateSite] = Field(default_factory=list)
     message: str

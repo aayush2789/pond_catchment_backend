@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 import numpy as np
 from pyproj import Transformer
 from scipy.interpolate import griddata
@@ -9,6 +9,7 @@ from app.schemas.catchment import (
     GeographicExtent,
     NormalizedContourDataset,
     ProjectedBounds,
+    SlopeMetadata,
     TerrainMetadata,
 )
 
@@ -22,6 +23,7 @@ class TerrainModel:
     geographic_extent: GeographicExtent
     min_elevation: float
     max_elevation: float
+    slope_grid: Optional[np.ndarray] = None
 
     @property
     def rows(self) -> int:
@@ -33,6 +35,14 @@ class TerrainModel:
 
     def to_metadata(self) -> TerrainMetadata:
         min_x, max_x, min_y, max_y = self.bounds
+        slope_meta = None
+        if self.slope_grid is not None:
+            slope_meta = SlopeMetadata(
+                min_slope_degrees=round(float(self.slope_grid.min()), 2),
+                max_slope_degrees=round(float(self.slope_grid.max()), 2),
+                mean_slope_degrees=round(float(self.slope_grid.mean()), 2),
+            )
+
         return TerrainMetadata(
             crs=self.crs,
             grid_resolution_meters=self.grid_resolution_meters,
@@ -47,6 +57,7 @@ class TerrainModel:
                 max_y=max_y,
             ),
             geographic_extent=self.geographic_extent,
+            slope=slope_meta,
         )
 
 
@@ -55,6 +66,12 @@ class TerrainService:
     def _compute_utm_epsg(lon: float, lat: float) -> int:
         zone = int((lon + 180) / 6) + 1
         return 32600 + zone if lat >= 0 else 32700 + zone
+
+    @staticmethod
+    def calculate_slope(elevation_grid: np.ndarray, resolution_meters: float) -> np.ndarray:
+        dy, dx = np.gradient(elevation_grid, resolution_meters, resolution_meters)
+        slope_rad = np.arctan(np.sqrt(dx**2 + dy**2))
+        return np.degrees(slope_rad)
 
     @classmethod
     def reconstruct_terrain(
@@ -135,6 +152,8 @@ class TerrainService:
                 detail="Terrain surface interpolation resulted in invalid elevation values.",
             )
 
+        slope_grid = cls.calculate_slope(dem_linear, resolution_meters)
+
         return TerrainModel(
             elevation_grid=dem_linear,
             crs=crs_str,
@@ -143,4 +162,5 @@ class TerrainService:
             geographic_extent=dataset.extent,
             min_elevation=float(dem_linear.min()),
             max_elevation=float(dem_linear.max()),
+            slope_grid=slope_grid,
         )

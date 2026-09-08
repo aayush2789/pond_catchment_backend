@@ -1,0 +1,35 @@
+Assignment 1 - Phase 2: Pond Catchment Analysis Backend
+Shivam Kushwaha
+•
+Aug 18 (Edited Sep 3)
+20 points
+|
+Due Sep 1, 11:59 PM
+Develop a backend API route that accepts a contour map(in KML/KMZ format), analyzes the terrain, and returns the catchment information required for pond planning.
+
+A sample contour map is provided for this phase. Use it to develop and test your solution, while designing the implementation so that it can be generalized to other contour maps in the next phase.
+
+Requirements
+Develop a backend route such as:
+POST /analyzeContour or /findCatchment
+Accept the contour map as an uploaded file.
+Analyze the contour/terrain information.
+Identify a suitable pond location/region.
+Estimate the corresponding catchment area.
+Return catchment information in a structured format such as JSON.
+Demonstrate the working API using the provided sample contour map.
+Important: 
+Do not hard-code locations, coordinates, or results specific to the sample map. The implementation should derive the results from the input contour map and be extensible to generalized contour maps.
+DEADLINE WILL NOT BE EXTENDED IN LIEU OF MID-SEM
+
+Submit a Report containting the following:
+Maintain a GitHub Repo and mention that link in the report.
+Working API route URL.
+Brief explanation of the catchment estimation approach.
+Demonstration using the provided contour map.
+API documentation.
+Evaluation
+Working API endpoint
+Code Extensibilty to future phases
+Documentation in the Report
+Catchment identification/estimation

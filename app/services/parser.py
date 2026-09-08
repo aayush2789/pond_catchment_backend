@@ -12,8 +12,10 @@ from app.schemas.catchment import (
     NormalizedContourDataset,
 )
 from app.services.candidate_selection import CandidateSelectionService
+from app.services.hydrology import HydrologyService
 from app.services.terrain import TerrainService
 from app.utils.file_handler import validate_contour_extension
+
 
 
 
@@ -240,6 +242,10 @@ class ContourParserService:
             dataset = cls.parse_and_normalize_kml(kml_bytes, filename)
             terrain_model = TerrainService.reconstruct_terrain(dataset)
             candidate_sites = CandidateSelectionService.identify_candidates(terrain_model)
+            selected_pond = candidate_sites[0] if candidate_sites else None
+            catchment_result = None
+            if selected_pond is not None:
+                catchment_result = HydrologyService.analyze_hydrology(terrain_model, selected_pond)
 
         return ContourInspectionResponse(
             filename=filename,
@@ -254,7 +260,10 @@ class ContourParserService:
             kml_entry_name=kml_entry_name,
             terrain=terrain_model.to_metadata(),
             candidate_sites=candidate_sites,
-            message="Contour file successfully validated, normalized, reconstructed, and evaluated for candidate pond sites.",
+            selected_pond=selected_pond,
+            catchment=catchment_result,
+            message="Contour file successfully validated, normalized, reconstructed, and analyzed for pond catchment.",
         )
+
 
 

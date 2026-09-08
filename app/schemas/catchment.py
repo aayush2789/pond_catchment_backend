@@ -28,6 +28,12 @@ class SlopeMetadata(BaseModel):
     mean_slope_degrees: float
 
 
+class HydrologyMetadata(BaseModel):
+    max_flow_accumulation_cells: float
+    outlet_flow_accumulation_cells: float
+    conditioned_sinks_filled: bool = True
+
+
 class ContourLine(BaseModel):
     id: str
     elevation: float
@@ -70,17 +76,29 @@ class PondCandidateSite(BaseModel):
     factor_scores: Dict[str, float] = Field(default_factory=dict)
 
 
+class CatchmentBoundary(BaseModel):
+    type: str = "Feature"
+    geometry: Dict[str, Any]
+    properties: Optional[Dict[str, Any]] = None
+
+
+class CatchmentResult(BaseModel):
+    outlet_location: Coordinates
+    snapped_outlet: Coordinates
+    elevation_meters: float
+    slope_degrees: Optional[float] = None
+    catchment_area_sq_meters: float
+    catchment_area_hectares: float
+    contributing_cells_count: int
+    hydrology: HydrologyMetadata
+    boundary: CatchmentBoundary
+
+
 class CandidatePond(BaseModel):
     id: str
     location: Coordinates
     suitability_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     estimated_depth_meters: Optional[float] = None
-
-
-class CatchmentBoundary(BaseModel):
-    type: str = "Feature"
-    geometry: Dict[str, Any]
-    properties: Optional[Dict[str, Any]] = None
 
 
 class CatchmentAnalysisResponse(BaseModel):
@@ -106,4 +124,6 @@ class ContourInspectionResponse(BaseModel):
     kml_entry_name: Optional[str] = None
     terrain: Optional[TerrainMetadata] = None
     candidate_sites: List[PondCandidateSite] = Field(default_factory=list)
+    selected_pond: Optional[PondCandidateSite] = None
+    catchment: Optional[CatchmentResult] = None
     message: str

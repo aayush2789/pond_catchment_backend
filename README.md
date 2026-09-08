@@ -90,17 +90,17 @@ Once running, access:
 | :--- | :--- | :--- |
 | `GET` | `/` | API status and root information |
 | `GET` | `/api/v1/health` | Service health status |
-| `POST` | `/api/v1/findCatchment` | Upload contour map, reconstruct terrain, calculate slope, and identify candidate pond sites |
+| `POST` | `/api/v1/findCatchment` | Upload contour map, reconstruct terrain, calculate slope, identify candidate pond sites, and delineate upstream catchment |
 | `POST` | `/api/v1/analyzeContour` | Alias endpoint for `/findCatchment` |
 
-## Testing the Upload & Candidate Siting Endpoint
+## Testing the Catchment Delineation Endpoint
 
 ### From Swagger UI (`/docs`)
 1. Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 2. Expand `POST /api/v1/findCatchment` under the **Catchment Analysis** tag.
 3. Click **Try it out**.
 4. Choose a `.kml` or `.kmz` contour map file (e.g. `data/sample/contours_1m.kml`).
-5. Click **Execute** to view the candidate sites and terrain metrics.
+5. Click **Execute** to view candidate sites and delineated upstream catchment boundary.
 
 ### Using `curl`
 ```powershell
@@ -163,35 +163,59 @@ curl.exe -X POST "http://127.0.0.1:8000/api/v1/findCatchment" `
         "slope_score": 1.0,
         "elevation_score": 1.0
       }
-    },
-    {
-      "id": "pond_site_2",
-      "rank": 2,
-      "latitude": 21.2631716,
-      "longitude": 81.282946,
-      "elevation": 267.0,
-      "slope_degrees": 2.38,
-      "suitability_score": 1.0,
-      "factor_scores": {
-        "slope_score": 1.0,
-        "elevation_score": 1.0
-      }
-    },
-    {
-      "id": "pond_site_3",
-      "rank": 3,
-      "latitude": 21.2460838,
-      "longitude": 81.289467,
-      "elevation": 268.0,
-      "slope_degrees": 2.19,
-      "suitability_score": 0.9839,
-      "factor_scores": {
-        "slope_score": 1.0,
-        "elevation_score": 0.9677
-      }
     }
   ],
-  "message": "Contour file successfully validated, normalized, reconstructed, and evaluated for candidate pond sites."
+  "selected_pond": {
+    "id": "pond_site_1",
+    "rank": 1,
+    "latitude": 21.2497874,
+    "longitude": 81.2899562,
+    "elevation": 267.0,
+    "slope_degrees": 2.8,
+    "suitability_score": 1.0
+  },
+  "catchment": {
+    "outlet_location": {
+      "latitude": 21.2497874,
+      "longitude": 81.2899562,
+      "elevation": 267.0
+    },
+    "snapped_outlet": {
+      "latitude": 21.2496987,
+      "longitude": 81.2889922,
+      "elevation": 273.86
+    },
+    "elevation_meters": 273.86,
+    "slope_degrees": 4.66,
+    "catchment_area_sq_meters": 14500.0,
+    "catchment_area_hectares": 1.45,
+    "contributing_cells_count": 145,
+    "hydrology": {
+      "max_flow_accumulation_cells": 173.0,
+      "outlet_flow_accumulation_cells": 145.0,
+      "conditioned_sinks_filled": true
+    },
+    "boundary": {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [81.288028, 21.249700],
+            [81.288028, 21.249791],
+            [81.288029, 21.250062],
+            [81.289089, 21.249969],
+            [81.288028, 21.249700]
+          ]
+        ]
+      },
+      "properties": {
+        "contributing_cells": 145,
+        "crs": "EPSG:32644"
+      }
+    }
+  },
+  "message": "Contour file successfully validated, normalized, reconstructed, and analyzed for pond catchment."
 }
 ```
 
@@ -203,12 +227,12 @@ Execute the automated test suite:
 pytest tests/ -v
 ```
 
-## Preliminary Pond Candidate Siting Details
+## Hydrological Analysis & Catchment Delineation Details
 
-- **Slope Modeling (`TerrainService.calculate_slope`)**: Computes finite difference gradients from the metric DEM, producing surface slopes in degrees $[0^\circ, 90^\circ]$.
-- **Explainable Multi-Criteria Scoring (`CandidateSelectionService`)**:
-  - **Slope Suitability ($S_{\text{slope}}$)**: Favors flat to gently sloping terrain ($\le 3^\circ$ ideal, penalizing steep slopes $> 12^\circ$).
-  - **Elevation Suitability ($S_{\text{elevation}}$)**: Favors low-lying valleys and natural collection areas over ridges.
-  - Retains individual factor scores for transparent auditing.
-- **Spatial Non-Maximum Suppression (NMS)**: Suppresses neighboring cells within a configurable distance (default: $150\text{ m}$), ensuring candidates represent distinct spatial pond regions rather than adjacent pixels.
-- **Extensibility**: The candidate scoring interface accepts configurable weights and is architected to seamlessly ingest future hydrological metrics (flow accumulation, catchment area, soil infiltration) without breaking existing modules.
+- **DEM Conditioning (`HydrologyService.condition_dem`)**: Priority-Flood algorithm fills artificial sinks and depressions, guaranteeing continuous downhill drainage across the terrain raster.
+- **D8 Flow Direction (`HydrologyService.calculate_flow_direction`)**: Evaluates the steepest descent drop $(z_i - z_n) / d$ among all 8 adjacent neighbors (accounting for diagonal distance $\sqrt{2}$).
+- **Flow Accumulation (`HydrologyService.calculate_flow_accumulation`)**: Computes upstream contributing area matrix via elevation-sorted topological routing.
+- **Pour-Point Snapping (`HydrologyService.snap_to_drainage_cell`)**: Snaps candidate pond locations to the nearest high-accumulation drainage channel within a configurable search radius (default: $100\text{ m}$) using distance-weighted tie-breaking.
+- **Catchment Delineation (`HydrologyService.delineate_catchment`)**: Reconstructs upstream contributing cells using reverse flow BFS graph traversal.
+- **Polygonization & Transformation (`HydrologyService.polygonize_catchment`)**: Converts contributing grid cells to a unified geometric polygon via Shapely, simplifies boundary artifacts, and transforms UTM coordinates back to standard WGS84 `(longitude, latitude)` GeoJSON.
+- **Metric Calculations**: Catchment area is accurately computed directly in projected metric units ($m^2$ and hectares: $10,000\text{ m}^2 = 1\text{ ha}$).

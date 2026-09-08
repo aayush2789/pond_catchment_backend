@@ -128,6 +128,10 @@ class TerrainService:
                 detail="Contour geometries do not span a valid 2D area.",
             )
 
+        max_dim = max(max_x - min_x, max_y - min_y)
+        if max_dim / resolution_meters > 500:
+            resolution_meters = round(max_dim / 400.0, 2)
+
         x_grid = np.arange(min_x, max_x + resolution_meters, resolution_meters)
         y_grid = np.arange(min_y, max_y + resolution_meters, resolution_meters)
 

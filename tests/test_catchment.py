@@ -96,6 +96,20 @@ def test_find_catchment_real_sample_file(client):
     assert "slope_score" in top_candidate["factor_scores"]
     assert "elevation_score" in top_candidate["factor_scores"]
 
+    assert data["selected_pond"] is not None
+    assert data["selected_pond"]["id"] == top_candidate["id"]
+
+    assert data["catchment"] is not None
+    catchment = data["catchment"]
+    assert catchment["catchment_area_sq_meters"] > 0
+    assert catchment["catchment_area_hectares"] > 0
+    assert catchment["contributing_cells_count"] > 0
+    assert catchment["hydrology"]["outlet_flow_accumulation_cells"] > 0
+    assert catchment["boundary"]["type"] == "Feature"
+    assert "geometry" in catchment["boundary"]
+    assert catchment["boundary"]["geometry"]["type"] in ("Polygon", "MultiPolygon")
+
+
 
 
 
@@ -122,13 +136,13 @@ def test_find_catchment_extended_data_elevation(client):
           <SimpleData name="ELEVATION">350.5</SimpleData>
         </SchemaData>
       </ExtendedData>
-      <LineString><coordinates>80.1,20.1 80.2,20.2</coordinates></LineString>
+      <LineString><coordinates>80.001,20.001 80.002,20.002</coordinates></LineString>
     </Placemark>
     <Placemark>
       <ExtendedData>
         <Data name="contour"><value>360.0</value></Data>
       </ExtendedData>
-      <LineString><coordinates>80.3,20.3 80.4,20.4</coordinates></LineString>
+      <LineString><coordinates>80.003,20.003 80.004,20.004</coordinates></LineString>
     </Placemark>
   </Document>
 </kml>"""
@@ -146,10 +160,10 @@ def test_find_catchment_3d_coordinates_fallback(client):
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <Placemark>
-      <LineString><coordinates>80.1,20.1,150.0 80.2,20.2,150.0</coordinates></LineString>
+      <LineString><coordinates>80.001,20.001,150.0 80.002,20.002,150.0</coordinates></LineString>
     </Placemark>
     <Placemark>
-      <LineString><coordinates>80.3,20.3,160.0 80.4,20.4,160.0</coordinates></LineString>
+      <LineString><coordinates>80.003,20.003,160.0 80.004,20.004,160.0</coordinates></LineString>
     </Placemark>
   </Document>
 </kml>"""
@@ -476,5 +490,132 @@ def test_candidate_selection_dynamic_locations():
     assert len(cand_1) > 0 and len(cand_2) > 0
     assert cand_1[0].latitude != cand_2[0].latitude
     assert cand_1[0].longitude != cand_2[0].longitude
+
+
+def test_hydrology_condition_dem():
+    import numpy as np
+    from app.services.hydrology import HydrologyService
+
+    # 5x5 grid with internal depression (pit) at center
+    dem = np.array([
+        [10.0, 10.0, 10.0, 10.0, 10.0],
+        [10.0,  5.0,  5.0,  5.0, 10.0],
+        [10.0,  5.0,  2.0,  5.0, 10.0],
+        [10.0,  5.0,  5.0,  5.0, 10.0],
+        [10.0, 10.0,  8.0, 10.0, 10.0],
+    ], dtype=np.float64)
+
+    filled = HydrologyService.condition_dem(dem)
+    # The depression should be filled up to the minimum spillway (8.0 at [4, 2])
+    assert filled[2, 2] == 8.0
+    assert filled[1, 1] == 8.0
+
+
+def test_hydrology_flow_direction_and_accumulation():
+    import numpy as np
+    from app.services.hydrology import HydrologyService
+
+    # Southward inclined ramp: row 0 is 50m, row 4 is 10m
+    ramp = np.array([
+        [50.0, 50.0, 50.0],
+        [40.0, 40.0, 40.0],
+        [30.0, 30.0, 30.0],
+        [20.0, 20.0, 20.0],
+        [10.0, 10.0, 10.0],
+    ], dtype=np.float64)
+
+    flow_dir = HydrologyService.calculate_flow_direction(ramp, resolution_meters=10.0)
+    acc = HydrologyService.calculate_flow_accumulation(flow_dir, ramp)
+
+    # Interior cells must flow South (index 1 in NEIGHBORS: (1, 0))
+    for r in range(1, 4):
+        assert flow_dir[r, 1] == 1
+
+    # Accumulation should strictly increase downstream along column 1
+    assert acc[1, 1] < acc[2, 1] < acc[3, 1] < acc[4, 1]
+
+
+def test_hydrology_snap_to_drainage_cell():
+    import numpy as np
+    from app.services.hydrology import HydrologyService
+
+    acc = np.zeros((10, 10), dtype=np.float64)
+    # Stream channel at column 5
+    acc[:, 5] = 100.0
+
+    bounds = (0.0, 100.0, 0.0, 100.0)
+    resolution = 10.0
+
+    # Candidate at x=35.0 (column 3), y=50.0 (row 5)
+    # Should snap to column 5 within snap radius
+    outlet_r, outlet_c = HydrologyService.snap_to_drainage_cell(
+        cand_x=35.0,
+        cand_y=50.0,
+        bounds=bounds,
+        resolution=resolution,
+        accumulation=acc,
+        snap_radius_meters=30.0,
+    )
+    assert outlet_r == 5
+    assert outlet_c == 5
+
+
+def test_hydrology_delineate_catchment_and_polygon():
+    from app.services.candidate_selection import CandidateSelectionService
+    from app.services.hydrology import HydrologyService
+    from app.services.parser import ContourParserService
+    from app.services.terrain import TerrainService
+
+    sample_path = Path("data/sample/contours_1m.kml")
+    if not sample_path.exists():
+        sample_path = Path("contours_1m.kml")
+
+    with open(sample_path, "rb") as f:
+        dataset = ContourParserService.parse_and_normalize_kml(f.read(), "contours_1m.kml")
+
+    terrain = TerrainService.reconstruct_terrain(dataset, resolution_meters=15.0)
+    candidates = CandidateSelectionService.identify_candidates(terrain)
+    assert len(candidates) > 0
+
+    catchment = HydrologyService.analyze_hydrology(terrain, candidates[0])
+    assert catchment.catchment_area_sq_meters > 0.0
+    assert catchment.catchment_area_hectares > 0.0
+    assert catchment.contributing_cells_count > 0
+    assert catchment.boundary.type == "Feature"
+    assert "coordinates" in catchment.boundary.geometry
+    assert catchment.hydrology.max_flow_accumulation_cells >= catchment.hydrology.outlet_flow_accumulation_cells
+
+
+def test_hydrology_candidate_outside_bounds_raises_400():
+    import pytest
+    from fastapi import HTTPException
+    from app.schemas.catchment import PondCandidateSite
+    from app.services.hydrology import HydrologyService
+    from app.services.parser import ContourParserService
+    from app.services.terrain import TerrainService
+
+    sample_path = Path("data/sample/contours_1m.kml")
+    if not sample_path.exists():
+        sample_path = Path("contours_1m.kml")
+
+    with open(sample_path, "rb") as f:
+        dataset = ContourParserService.parse_and_normalize_kml(f.read(), "contours_1m.kml")
+
+    terrain = TerrainService.reconstruct_terrain(dataset, resolution_meters=20.0)
+
+    outside_cand = PondCandidateSite(
+        id="outside",
+        rank=1,
+        latitude=0.0,
+        longitude=0.0,
+        elevation=100.0,
+        slope_degrees=1.0,
+        suitability_score=0.9,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        HydrologyService.analyze_hydrology(terrain, outside_cand)
+    assert exc_info.value.status_code == 400
+
 
 

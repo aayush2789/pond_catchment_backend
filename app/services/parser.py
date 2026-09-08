@@ -11,7 +11,9 @@ from app.schemas.catchment import (
     GeographicExtent,
     NormalizedContourDataset,
 )
+from app.services.terrain import TerrainService
 from app.utils.file_handler import validate_contour_extension
+
 
 VALID_KML_ROOT_TAGS = {"kml", "document", "folder"}
 ELEVATION_ATTR_NAMES = {"elevation", "elev", "contour", "z", "height", "level", "ele"}
@@ -234,6 +236,7 @@ class ContourParserService:
                 kml_bytes = file_content
 
             dataset = cls.parse_and_normalize_kml(kml_bytes, filename)
+            terrain_model = TerrainService.reconstruct_terrain(dataset)
 
         return ContourInspectionResponse(
             filename=filename,
@@ -246,5 +249,7 @@ class ContourParserService:
             max_elevation=dataset.max_elevation,
             extent=dataset.extent,
             kml_entry_name=kml_entry_name,
-            message="Contour file successfully validated and normalized for terrain analysis.",
+            terrain=terrain_model.to_metadata(),
+            message="Contour file successfully validated, normalized, and reconstructed into terrain surface.",
         )
+

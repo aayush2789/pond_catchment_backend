@@ -4,6 +4,8 @@ from app.schemas.catchment import (
     ContourLine,
     GeographicExtent,
     NormalizedContourDataset,
+    ProjectedBounds,
+    TerrainMetadata,
 )
 from app.schemas.health import HealthResponse
 
@@ -14,4 +16,6 @@ __all__ = [
     "ContourLine",
     "GeographicExtent",
     "NormalizedContourDataset",
+    "ProjectedBounds",
+    "TerrainMetadata",
 ]

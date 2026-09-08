@@ -69,6 +69,18 @@ def test_find_catchment_real_sample_file(client):
     assert data["extent"]["min_latitude"] < data["extent"]["max_latitude"]
     assert data["extent"]["min_longitude"] < data["extent"]["max_longitude"]
 
+    assert data["terrain"] is not None
+    terrain = data["terrain"]
+    assert terrain["crs"] == "EPSG:32644"
+    assert terrain["grid_resolution_meters"] == 10.0
+    assert terrain["rows"] > 0
+    assert terrain["cols"] > 0
+    assert terrain["min_elevation"] >= 267.0
+    assert terrain["max_elevation"] <= 298.0
+    assert terrain["projected_bounds"]["min_x"] < terrain["projected_bounds"]["max_x"]
+    assert terrain["projected_bounds"]["min_y"] < terrain["projected_bounds"]["max_y"]
+
+
 
 def test_find_catchment_valid_kmz(client):
     kmz_data = build_kmz_bytes("nested/village_terrain.kml", VALID_KML_CONTENT)
@@ -234,3 +246,127 @@ def test_find_catchment_kmz_without_kml(client):
 def test_find_catchment_missing_upload(client):
     response = client.post("/api/v1/findCatchment")
     assert response.status_code == 422
+
+
+def test_terrain_service_direct_reconstruction():
+    import numpy as np
+    from app.services.parser import ContourParserService
+    from app.services.terrain import TerrainService
+
+    sample_path = Path("data/sample/contours_1m.kml")
+    if not sample_path.exists():
+        sample_path = Path("contours_1m.kml")
+
+    with open(sample_path, "rb") as f:
+        dataset = ContourParserService.parse_and_normalize_kml(f.read(), "contours_1m.kml")
+
+    model = TerrainService.reconstruct_terrain(dataset, resolution_meters=15.0)
+    assert model.crs == "EPSG:32644"
+    assert isinstance(model.elevation_grid, np.ndarray)
+    assert model.elevation_grid.shape[0] == model.rows
+    assert model.elevation_grid.shape[1] == model.cols
+    assert model.rows > 0 and model.cols > 0
+    assert np.isnan(model.elevation_grid).sum() == 0
+    assert np.isinf(model.elevation_grid).sum() == 0
+    assert model.min_elevation >= 267.0
+    assert model.max_elevation <= 298.0
+
+    metadata = model.to_metadata()
+    assert metadata.crs == "EPSG:32644"
+    assert metadata.rows == model.rows
+    assert metadata.cols == model.cols
+
+
+def test_terrain_reconstruction_bounds_derived_dynamically():
+    from app.schemas.catchment import ContourLine, GeographicExtent, NormalizedContourDataset
+    from app.services.terrain import TerrainService
+
+    dataset_a = NormalizedContourDataset(
+        filename="area_a.kml",
+        contour_count=2,
+        min_elevation=100.0,
+        max_elevation=200.0,
+        extent=GeographicExtent(min_latitude=10.0, max_latitude=10.01, min_longitude=75.0, max_longitude=75.01),
+        contours=[
+            ContourLine(id="1", elevation=100.0, coordinates=[(75.0, 10.0), (75.01, 10.0)], vertex_count=2),
+            ContourLine(id="2", elevation=200.0, coordinates=[(75.0, 10.01), (75.01, 10.01)], vertex_count=2),
+        ],
+    )
+
+    dataset_b = NormalizedContourDataset(
+        filename="area_b.kml",
+        contour_count=2,
+        min_elevation=100.0,
+        max_elevation=200.0,
+        extent=GeographicExtent(min_latitude=30.0, max_latitude=30.01, min_longitude=85.0, max_longitude=85.01),
+        contours=[
+            ContourLine(id="1", elevation=100.0, coordinates=[(85.0, 30.0), (85.01, 30.0)], vertex_count=2),
+            ContourLine(id="2", elevation=200.0, coordinates=[(85.0, 30.01), (85.01, 30.01)], vertex_count=2),
+        ],
+    )
+
+    model_a = TerrainService.reconstruct_terrain(dataset_a, resolution_meters=50.0)
+    model_b = TerrainService.reconstruct_terrain(dataset_b, resolution_meters=50.0)
+
+    assert model_a.crs != model_b.crs
+    assert model_a.bounds != model_b.bounds
+
+
+def test_terrain_reconstruction_input_change_changes_output():
+    from app.schemas.catchment import ContourLine, GeographicExtent, NormalizedContourDataset
+    from app.services.terrain import TerrainService
+
+    dataset_low = NormalizedContourDataset(
+        filename="low.kml",
+        contour_count=2,
+        min_elevation=50.0,
+        max_elevation=60.0,
+        extent=GeographicExtent(min_latitude=20.0, max_latitude=20.01, min_longitude=80.0, max_longitude=80.01),
+        contours=[
+            ContourLine(id="1", elevation=50.0, coordinates=[(80.0, 20.0), (80.01, 20.0)], vertex_count=2),
+            ContourLine(id="2", elevation=60.0, coordinates=[(80.0, 20.01), (80.01, 20.01)], vertex_count=2),
+        ],
+    )
+
+    dataset_high = NormalizedContourDataset(
+        filename="high.kml",
+        contour_count=2,
+        min_elevation=500.0,
+        max_elevation=600.0,
+        extent=GeographicExtent(min_latitude=20.0, max_latitude=20.01, min_longitude=80.0, max_longitude=80.01),
+        contours=[
+            ContourLine(id="1", elevation=500.0, coordinates=[(80.0, 20.0), (80.01, 20.0)], vertex_count=2),
+            ContourLine(id="2", elevation=600.0, coordinates=[(80.0, 20.01), (80.01, 20.01)], vertex_count=2),
+        ],
+    )
+
+    model_low = TerrainService.reconstruct_terrain(dataset_low, resolution_meters=50.0)
+    model_high = TerrainService.reconstruct_terrain(dataset_high, resolution_meters=50.0)
+
+    assert model_low.max_elevation < 100.0
+    assert model_high.min_elevation > 400.0
+    assert not (model_low.elevation_grid == model_high.elevation_grid).all()
+
+
+def test_terrain_service_insufficient_points():
+    import pytest
+    from fastapi import HTTPException
+    from app.schemas.catchment import ContourLine, GeographicExtent, NormalizedContourDataset
+    from app.services.terrain import TerrainService
+
+    dataset_empty = NormalizedContourDataset(
+        filename="sparse.kml",
+        contour_count=2,
+        min_elevation=10.0,
+        max_elevation=20.0,
+        extent=GeographicExtent(min_latitude=20.0, max_latitude=20.01, min_longitude=80.0, max_longitude=80.01),
+        contours=[
+            ContourLine(id="1", elevation=10.0, coordinates=[(80.0, 20.0)], vertex_count=1),
+            ContourLine(id="2", elevation=20.0, coordinates=[(80.01, 20.01)], vertex_count=1),
+        ],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        TerrainService.reconstruct_terrain(dataset_empty)
+    assert exc_info.value.status_code == 400
+

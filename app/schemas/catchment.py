@@ -15,6 +15,13 @@ class GeographicExtent(BaseModel):
     max_longitude: float
 
 
+class ProjectedBounds(BaseModel):
+    min_x: float
+    max_x: float
+    min_y: float
+    max_y: float
+
+
 class ContourLine(BaseModel):
     id: str
     elevation: float
@@ -32,6 +39,17 @@ class NormalizedContourDataset(BaseModel):
     elevation_unit: str = "meters"
     extent: GeographicExtent
     contours: List[ContourLine] = Field(default_factory=list)
+
+
+class TerrainMetadata(BaseModel):
+    crs: str
+    grid_resolution_meters: float
+    rows: int
+    cols: int
+    min_elevation: float
+    max_elevation: float
+    projected_bounds: ProjectedBounds
+    geographic_extent: GeographicExtent
 
 
 class CandidatePond(BaseModel):
@@ -68,4 +86,5 @@ class ContourInspectionResponse(BaseModel):
     max_elevation: float
     extent: GeographicExtent
     kml_entry_name: Optional[str] = None
+    terrain: Optional[TerrainMetadata] = None
     message: str

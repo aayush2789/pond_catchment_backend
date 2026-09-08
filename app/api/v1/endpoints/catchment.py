@@ -8,13 +8,13 @@ router = APIRouter()
 @router.post(
     "/findCatchment",
     response_model=ContourInspectionResponse,
-    summary="Validate and inspect uploaded contour map",
-    description="Accepts a KML or KMZ contour map file via multipart form-data, safely inspects the archive or document structure in temporary storage, and returns validation metadata.",
+    summary="Validate contour map and reconstruct terrain surface",
+    description="Accepts a KML or KMZ contour map file via multipart form-data, validates and normalizes contour geometries, reconstructs a continuous projected elevation surface (DEM), and returns terrain metadata.",
 )
 @router.post(
     "/analyzeContour",
     response_model=ContourInspectionResponse,
-    summary="Validate and inspect uploaded contour map (alias)",
+    summary="Validate contour map and reconstruct terrain surface (alias)",
     description="Alias endpoint for /findCatchment.",
 )
 async def find_catchment(

@@ -4,6 +4,24 @@ A modular, extensible FastAPI backend service for the AI-based Village Pond Plan
 
 ---
 
+## Deployment Status & Live Service
+
+[![Deployment Status](https://img.shields.io/badge/Render-Live%20Online-success?style=for-the-badge&logo=render)](https://pond-catchment-backend.onrender.com/docs)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110.0-009688?style=for-the-badge&logo=fastapi)](https://pond-catchment-backend.onrender.com/docs)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12.3-3776AB?style=for-the-badge&logo=python)](https://pond-catchment-backend.onrender.com/docs)
+
+The backend service is actively deployed and hosted live on **Render**:
+
+| Resource | Live URL | Status | Description |
+| :--- | :--- | :--- | :--- |
+| **Interactive API Docs (Swagger UI)** | [https://pond-catchment-backend.onrender.com/docs](https://pond-catchment-backend.onrender.com/docs) | `200 OK` | Interactive testing of all endpoints |
+| **Alternative Docs (ReDoc)** | [https://pond-catchment-backend.onrender.com/redoc](https://pond-catchment-backend.onrender.com/redoc) | `200 OK` | Schema & OpenAPI specification |
+| **Root Service Status** | [https://pond-catchment-backend.onrender.com/](https://pond-catchment-backend.onrender.com/) | `200 OK` | Service metadata and version |
+| **Health Check Endpoint** | [https://pond-catchment-backend.onrender.com/api/v1/health](https://pond-catchment-backend.onrender.com/api/v1/health) | `200 OK` | System liveness probe |
+| **Catchment Analysis Endpoint** | `POST https://pond-catchment-backend.onrender.com/api/v1/findCatchment` | `Active` | Production terrain & catchment pipeline |
+
+---
+
 ## Architecture & Modular Structure
 
 The backend follows clean architectural principles where the API route layer orchestrates dedicated, single-responsibility services. Every result is derived dynamically from input files without hard-coded coordinates, elevation values, bounds, or areas.
@@ -86,11 +104,11 @@ Start the development server with Uvicorn:
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Once running:
-- **Interactive Swagger Documentation**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- **ReDoc Documentation**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
-- **Root Service Status**: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
-- **Health Check**: [http://127.0.0.1:8000/api/v1/health](http://127.0.0.1:8000/api/v1/health)
+Live Service & API Documentation:
+- **Interactive Swagger Documentation**: [https://pond-catchment-backend.onrender.com/docs](https://pond-catchment-backend.onrender.com/docs)
+- **ReDoc Documentation**: [https://pond-catchment-backend.onrender.com/redoc](https://pond-catchment-backend.onrender.com/redoc)
+- **Root Service Status**: [https://pond-catchment-backend.onrender.com/](https://pond-catchment-backend.onrender.com/)
+- **Health Check**: [https://pond-catchment-backend.onrender.com/api/v1/health](https://pond-catchment-backend.onrender.com/api/v1/health)
 
 ---
 
@@ -325,14 +343,14 @@ pytest tests/ -v
 
 ## Demonstration Using Provided Sample File
 
-### Using `curl` (PowerShell)
-```powershell
-curl.exe -X POST "http://127.0.0.1:8000/api/v1/findCatchment" `
+### Using `curl`
+```bash
+curl -X POST "https://pond-catchment-backend.onrender.com/api/v1/findCatchment" \
   -F "file=@data/sample/contours_1m.kml"
 ```
 
 ### Using Swagger UI
-1. Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+1. Open [https://pond-catchment-backend.onrender.com/docs](https://pond-catchment-backend.onrender.com/docs).
 2. Expand `POST /api/v1/findCatchment`.
 3. Click **Try it out**.
 4. Choose `data/sample/contours_1m.kml`.
@@ -385,14 +403,15 @@ The repository includes a production-ready [Dockerfile](file:///c:/CodingNest/po
 2. Select your repository and choose **Docker** as the runtime.
 3. Render will build the container using the provided `Dockerfile` and launch Uvicorn on `$PORT`.
 
-### Testing Your Live Deployed API
+### Live Deployed API Endpoints
 
-Once deployed, Render provides a public URL (e.g., `https://pond-catchment-backend.onrender.com`):
+The API is actively running on Render:
 
-- **Health Check**: `https://<YOUR-RENDER-URL>/api/v1/health`
-- **Interactive API Docs**: `https://<YOUR-RENDER-URL>/docs`
-- **Analyze Catchment**:
+- **Health Check**: [https://pond-catchment-backend.onrender.com/api/v1/health](https://pond-catchment-backend.onrender.com/api/v1/health)
+- **Interactive Swagger Docs**: [https://pond-catchment-backend.onrender.com/docs](https://pond-catchment-backend.onrender.com/docs)
+- **ReDoc API Docs**: [https://pond-catchment-backend.onrender.com/redoc](https://pond-catchment-backend.onrender.com/redoc)
+- **Analyze Catchment (cURL)**:
   ```bash
-  curl -X POST "https://<YOUR-RENDER-URL>/api/v1/findCatchment" \
+  curl -X POST "https://pond-catchment-backend.onrender.com/api/v1/findCatchment" \
     -F "file=@data/sample/contours_1m.kml"
   ```

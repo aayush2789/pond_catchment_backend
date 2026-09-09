@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: pond-catchment-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: PROJECT_NAME
+        value: Village Pond Planning System
+      - key: API_V1_STR
+        value: /api/v1
+      - key: DEBUG
+        value: false

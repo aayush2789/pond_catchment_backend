@@ -337,3 +337,62 @@ curl.exe -X POST "http://127.0.0.1:8000/api/v1/findCatchment" `
 3. Click **Try it out**.
 4. Choose `data/sample/contours_1m.kml`.
 5. Click **Execute** to view the parsed contours, reconstructed terrain metadata, candidate rankings, and the GeoJSON catchment polygon.
+
+---
+
+## Deployment on Render (render.com)
+
+The repository is configured for automated deployment on [Render](https://render.com) as a Web Service.
+
+### Option A: 1-Click Deployment via Blueprint (Recommended)
+
+1. Push your repository to GitHub.
+2. Log in to [Render Dashboard](https://dashboard.render.com).
+3. Click **New +** -> **Blueprint**.
+4. Connect your GitHub repository.
+5. Render detects [render.yaml](file:///c:/CodingNest/pond_catchment_backend/render.yaml) and automatically configures:
+   - **Service Name**: `pond-catchment-backend`
+   - **Environment**: `Python` (`3.12.3` via [.python-version](file:///c:/CodingNest/pond_catchment_backend/.python-version))
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - **Health Check Path**: `/api/v1/health`
+6. Click **Apply**. Render will build and deploy the service.
+
+### Option B: Manual Web Service Setup
+
+If setting up manually on Render:
+1. Click **New +** -> **Web Service**.
+2. Select your repository.
+3. Configure the following fields:
+   - **Name**: `pond-catchment-backend`
+   - **Language**: `Python`
+   - **Branch**: `main`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+4. Under **Advanced**:
+   - **Health Check Path**: `/api/v1/health`
+   - **Environment Variables**:
+     - `PYTHON_VERSION`: `3.12.3`
+     - `PROJECT_NAME`: `Village Pond Planning System`
+     - `API_V1_STR`: `/api/v1`
+     - `DEBUG`: `false`
+5. Click **Create Web Service**.
+
+### Option C: Docker Container Deployment
+
+The repository includes a production-ready [Dockerfile](file:///c:/CodingNest/pond_catchment_backend/Dockerfile).
+1. Click **New +** -> **Web Service**.
+2. Select your repository and choose **Docker** as the runtime.
+3. Render will build the container using the provided `Dockerfile` and launch Uvicorn on `$PORT`.
+
+### Testing Your Live Deployed API
+
+Once deployed, Render provides a public URL (e.g., `https://pond-catchment-backend.onrender.com`):
+
+- **Health Check**: `https://<YOUR-RENDER-URL>/api/v1/health`
+- **Interactive API Docs**: `https://<YOUR-RENDER-URL>/docs`
+- **Analyze Catchment**:
+  ```bash
+  curl -X POST "https://<YOUR-RENDER-URL>/api/v1/findCatchment" \
+    -F "file=@data/sample/contours_1m.kml"
+  ```

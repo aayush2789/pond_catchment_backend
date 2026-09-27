@@ -156,6 +156,17 @@ class LandSelectionService:
 
     @classmethod
     def validate_and_measure(cls, geometry: LandGeometry) -> SelectedLand:
+        # Phase 10 guard: reject absurdly detailed polygons before any processing.
+        vertex_count = sum(1 for _ in cls._iter_positions(geometry))
+        if vertex_count > settings.MAX_LAND_VERTICES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Selected land geometry contains {vertex_count} vertices, exceeding the "
+                    f"maximum of {settings.MAX_LAND_VERTICES}. Simplify the polygon before submitting."
+                ),
+            )
+
         cls._validate_coordinate_ranges(geometry)
         shapely_geom = cls._to_shapely(geometry)
 

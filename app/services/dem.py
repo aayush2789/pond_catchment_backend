@@ -29,10 +29,8 @@ import io
 import json
 import math
 from collections import OrderedDict
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
-from urllib.parse import quote
 
 import httpx
 import numpy as np
@@ -42,8 +40,8 @@ from scipy.ndimage import distance_transform_edt
 from fastapi import HTTPException, status
 
 from app.core.config import settings
-from app.schemas.catchment import GeographicExtent, ProjectedBounds
-from app.services.terrain import TerrainService
+from app.schemas.catchment import GeographicExtent
+from app.services.terrain import DEMData, DEMSourceInfo, TerrainService
 
 # --- Documented constants -------------------------------------------------------------
 
@@ -91,43 +89,6 @@ MAX_PLAUSIBLE_ELEVATION_M = 9000.0
 MAX_NODATA_FRACTION = 0.5
 
 _MEMORY_CACHE_MAX_ENTRIES = 4
-
-
-# --- Result containers ----------------------------------------------------------------
-
-
-@dataclass
-class DEMSourceInfo:
-    provider: str
-    dataset: str
-    attribution: str
-    zoom_level: Optional[int] = None  # only for slippy-tile providers
-
-
-@dataclass
-class DEMData:
-    """Elevation grid resampled onto a regular projected (UTM) grid.
-
-    This is the "acquired DEM" handed to the terrain pipeline; it carries the same
-    geometric semantics as a reconstructed contour terrain (metric grid + bounds).
-    """
-
-    elevation_grid: np.ndarray  # (rows, cols) float32, meters
-    crs: str
-    resolution_meters: float
-    bounds: Tuple[float, float, float, float]  # (min_x, max_x, min_y, max_y) projected
-    geographic_extent: GeographicExtent  # WGS84 analysis extent (land bbox + buffer)
-    source: DEMSourceInfo
-    nodata_cells_filled: int = 0
-    cache_hit: bool = False
-
-    @property
-    def rows(self) -> int:
-        return int(self.elevation_grid.shape[0])
-
-    @property
-    def cols(self) -> int:
-        return int(self.elevation_grid.shape[1])
 
 
 # --- Shared bilinear sampler -----------------------------------------------------------

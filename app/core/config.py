@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     DEM_MAX_EXTENT_KM: float = 15.0
     DEM_MAX_RESPONSE_MB: int = 64
 
+    # --- Rainfall acquisition (Phase 5) ---
+    RAINFALL_YEARS_WINDOW: int = 10
+    RAINFALL_REQUEST_TIMEOUT_S: int = 30
+    RAINFALL_CACHE_DIR: str = "data/cache/rainfall"
+
+    # --- Performance/scaling guards (Phase 10) ---
+    MAX_UPLOAD_SIZE_MB: float = 20.0
+    MAX_LAND_VERTICES: int = 2000
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

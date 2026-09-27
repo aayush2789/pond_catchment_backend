@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from app.api.v1.api import api_router
 from app.core.config import settings
 
@@ -21,6 +24,11 @@ app.add_middleware(
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
+# Frontend (Phase 9): lightweight static map application served by the same service.
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/app", StaticFiles(directory=str(_STATIC_DIR), html=True), name="frontend")
+
 
 @app.get("/", tags=["Root"])
 def root_endpoint():
@@ -29,6 +37,7 @@ def root_endpoint():
         "version": settings.VERSION,
         "docs": "/docs",
         "health": f"{settings.API_V1_STR}/health",
+        "frontend": "/app/",
     }
 
 

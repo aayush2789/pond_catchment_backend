@@ -1,6 +1,8 @@
-# AI-Based Village Pond Planning System - Backend (Assignment 1 Phase 2)
+# AI-Based Village Pond Planning System (Assignment 2 — End-to-End Pond Planning)
 
-A modular, extensible FastAPI backend service for the AI-based Village Pond Planning System. This system processes village contour maps (uploaded in KML or KMZ formats) to dynamically reconstruct continuous digital elevation models (DEM), model surface slopes, identify promising candidate pond regions using explainable terrain criteria, simulate hydrological drainage via D8 flow modeling, and delineate upstream catchment boundaries and metric drainage areas formatted as GeoJSON.
+A modular FastAPI backend **plus lightweight map frontend** for the AI-based Village Pond Planning System. The user selects a land area on an interactive map; the backend automatically acquires a DEM from public elevation sources, reconstructs terrain and contours, sites a pond candidate inside the selected land using explainable terrain/hydrology criteria, delineates the upstream catchment (which may extend beyond the selected land), obtains historical rainfall, and estimates theoretical runoff, expected collectible water, and indicative pond storage — all returned as structured GeoJSON/JSON ready for map visualization.
+
+The original KML/KMZ contour-upload workflow (`/findCatchment`) is fully preserved as a fallback and for expert/testing use.
 
 ---
 
@@ -33,9 +35,10 @@ pond_catchment_backend/
 │   │   └── v1/
 │   │   ├── endpoints/
 │   │   │   ├── health.py             # System liveness and health check endpoint
-│   │   │   ├── catchment.py          # Route orchestrator for /findCatchment & /analyzeContour
+│   │   │   ├── catchment.py          # Route orchestrator for /findCatchment & /analyzeContour (KML fallback)
 │   │   │   ├── land.py               # Route orchestrator for /analyzeLand (land selection)
-│   │   │   └── terrain.py            # Route orchestrator for /terrainPreview (auto DEM acquisition)
+│   │   │   ├── terrain.py            # Route orchestrator for /terrainPreview (DEM acquisition preview)
+│   │   │   └── pond_site.py          # Route orchestrator for /analyzePondSite (unified workflow)
 │   │   └── api.py                    # V1 API router aggregator
 │   ├── core/
 │   │   └── config.py                     # Environment-driven settings (pydantic-settings)
@@ -44,25 +47,45 @@ pond_catchment_backend/
 │   │   ├── health.py                     # Health check schemas
 │   │   ├── catchment.py                  # Pydantic schemas: Contours, DEM, Candidates, Catchment, GeoJSON
 │   │   ├── land.py                       # Pydantic schemas: GeoJSON land selection, area, bbox, centroid
-│   │   └── terrain.py                    # Pydantic schemas: terrain preview / DEM acquisition
+│   │   ├── terrain.py                    # Pydantic schemas: terrain preview / DEM acquisition
+│   │   ├── rainfall.py                   # Pydantic schemas: rainfall statistics
+│   │   ├── water.py                      # Pydantic schemas: runoff / collectible water
+│   │   ├── pond.py                       # Pydantic schemas: indicative pond storage
+│   │   └── pond_site.py                  # Pydantic schemas: unified analysis request/response
 │   ├── services/
 │   │   ├── parser.py                     # KML/KMZ unpacking, XML parsing, & contour normalization
-│   │   ├── terrain.py                    # Dynamic UTM projection, DEM interpolation, & slope calculation
+│   │   ├── terrain.py                    # UTM projection, DEM interpolation, slope, DEM->TerrainModel, land mask
 │   │   ├── candidate_selection.py        # Explainable multi-factor candidate pond siting & ranking
 │   │   ├── hydrology.py                  # Priority-Flood sink filling, D8 flow, snapping, & catchment delineation
 │   │   ├── land.py                       # GeoJSON land-area validation & geodesic area measurement
-│   │   └── dem.py                        # Automatic DEM acquisition (public providers), caching & validation
+│   │   ├── dem.py                        # Automatic DEM acquisition (AWS Terrain Tiles / OpenTopography) + caching
+│   │   ├── contours.py                   # DEM -> contour lines (marching squares) as GeoJSON
+│   │   ├── rainfall.py                   # Historical rainfall (Open-Meteo, NASA POWER fallback) + caching
+│   │   ├── water.py                      # Transparent runoff / expected collectible water estimation
+│   │   ├── pond.py                       # Indicative pond storage sizing (separate from runoff)
+│   │   └── pond_planning.py              # Unified pipeline orchestration (Phase 8)
+│   ├── static/                           # Frontend (Leaflet map, no build step)
+│   │   ├── index.html                    # Map, drawing tools, results panel
+│   │   ├── app.js                        # Map interactions + API calls (no calculations)
+│   │   └── style.css
 │   ├── utils/
 │   │   └── file_handler.py               # File extension & archive validation utilities
-│   └── main.py                           # FastAPI application entry point, CORS, & routers
+│   └── main.py                           # FastAPI application entry point, CORS, routers, /app static mount
 ├── data/
+│   ├── cache/                            # DEM + rainfall disk caches (gitignored)
 │   └── sample/                           # Sample contour datasets
 │       └── contours_1m.kml               # 1,355 contour lines (1m interval, 267m - 298m elevation)
 ├── tests/
 │   ├── conftest.py                       # Pytest fixtures and TestClient configuration
-│   ├── test_catchment.py                 # Full unit & end-to-end integration test suite
+│   ├── test_catchment.py                 # Contour pipeline unit & end-to-end test suite
 │   ├── test_land.py                      # Land selection validation & measurement test suite
 │   ├── test_dem.py                       # DEM acquisition, caching & validation test suite
+│   ├── test_contours.py                  # Contour generation & DEM terrain integration tests
+│   ├── test_pond_siting.py               # Land-constrained candidates + catchment tests
+│   ├── test_rainfall.py                  # Rainfall parsing/fallback/caching tests
+│   ├── test_water.py                     # Runoff + storage estimation tests
+│   ├── test_pond_site.py                 # Unified /analyzePondSite end-to-end tests
+│   ├── test_limits_and_frontend.py       # Request-size guards + static frontend tests
 │   └── test_health.py                    # Health & status test suite
 ├── .env.example                          # Environment configuration template
 ├── .gitignore                            # Git exclusions for Python, venv, caches, logs
@@ -132,10 +155,13 @@ Live Service & API Documentation:
 | `POST` | `/api/v1/analyzeContour` | Analyze Contour (Alias) | Identical alias for `/findCatchment` |
 | `POST` | `/api/v1/analyzeLand` | Analyze Land Selection | Validate a user-selected land polygon (GeoJSON) and return area, bounding box, & centroid |
 | `POST` | `/api/v1/terrainPreview` | Terrain Preview (Auto DEM) | Acquire a DEM for the buffered analysis extent around a selected land polygon |
+| `POST` | `/api/v1/analyzePondSite` | **Unified Pond-Site Analysis** | Full workflow: land → DEM → terrain/contours → pond candidate → catchment → rainfall → water volume → storage |
+| `GET` | `/app/` | Frontend | Interactive map application (draw land, analyze, view overlays) |
 
 ### Request Format
 - **`/findCatchment` & `/analyzeContour`**: `multipart/form-data`, parameter `file` (Binary file, extension `.kml` or `.kmz`)
 - **`/analyzeLand` & `/terrainPreview`**: `application/json` with a `geometry` field containing a GeoJSON `Polygon` or `MultiPolygon`
+- **`/analyzePondSite`**: `multipart/form-data` with `request` (JSON string: `{"geometry": {...}, "analysis_parameters": {...}}`) and optionally `file` (KML/KMZ expert path)
 
 ### Land Area Selection (`POST /api/v1/analyzeLand`)
 
@@ -248,6 +274,57 @@ AWS Terrain Tiles is the default because it needs no registration and has no tig
 }
 ```
 
+### Unified Analysis (`POST /api/v1/analyzePondSite`)
+
+The complete end-to-end workflow. **Normal usage requires no file upload** — only the selected land GeoJSON; terrain is acquired automatically through the DEM service. A KML/KMZ contour file may be supplied instead for expert/testing use (backwards compatibility).
+
+**Workflow:** selected land → analysis extent (land bbox + buffer) → DEM acquisition (cached) → terrain & slope → contours (GeoJSON) → hydrology conditioning + D8 flow + accumulation (computed once, shared) → pond candidates (constrained to the selected land, flow-weighted scoring) → catchment delineation (not clipped to the land) → rainfall (cached) → theoretical runoff → expected collectible water → indicative pond storage.
+
+**Request** (multipart form field `request`):
+```json
+{
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [[81.290, 21.245], [81.296, 21.245], [81.296, 21.250], [81.290, 21.250], [81.290, 21.245]]
+        ]
+    },
+    "analysis_parameters": {
+        "buffer_meters": 500,
+        "contour_interval_m": 5,
+        "runoff_coefficient": 0.35,
+        "collection_efficiency": 0.75
+    }
+}
+```
+
+**Response structure (`200 OK`, abridged):**
+```json
+{
+  "status": "success",
+  "selected_land": { "area_m2": 344776.38, "area_hectares": 34.4776, "geometry": { "...": "GeoJSON Polygon" } },
+  "terrain": { "crs": "EPSG:32644", "grid_resolution_meters": 30.0, "rows": 52, "cols": 55, "slope": { "mean_slope_degrees": 1.85 } },
+  "contours": { "type": "FeatureCollection", "features": [ { "geometry": { "type": "LineString" }, "properties": { "elevation_m": 275.0 } } ] },
+  "pond": { "latitude": 21.2469, "longitude": 81.2899, "elevation": 269.4, "slope_degrees": 2.4, "suitability_score": 0.83, "factor_scores": { "slope_score": 1.0, "elevation_score": 0.9, "flow_score": 0.6 } },
+  "catchment": { "catchment_area_m2": 145000.0, "catchment_area_hectares": 14.5, "contributing_cells_count": 161, "boundary": { "type": "Feature", "geometry": { "type": "Polygon" } } },
+  "rainfall": { "rainfall_mm": 1213.4, "period": "2015-2024", "source": "open-meteo", "dataset": "ERA5 / ERA5-Land reanalysis" },
+  "water": {
+    "runoff_coefficient": 0.35,
+    "runoff_coefficient_basis": "Explicitly provided in the analysis parameters.",
+    "theoretical_runoff_m3": 61540.1,
+    "collection_efficiency": 0.75,
+    "expected_collectible_water_m3": 46155.1
+  },
+  "pond_storage": { "storage_capacity_m3": 46155.1, "depth_m": 3.0, "top_length_m": 190.3, "top_width_m": 132.9, "note": "Indicative conceptual sizing …" },
+  "dem_source": { "provider": "aws_terrain_tiles", "dataset": "terrarium", "zoom_level": 13 },
+  "message": "Terrain acquired automatically for the buffered analysis extent around the selected land. ..."
+}
+```
+
+> The values above are illustrative; every value is derived dynamically from the input geometry and acquired data — nothing is hard-coded.
+
+**Frontend (`GET /app/`):** a no-build Leaflet application served by the same backend. The user draws the land polygon on an interactive map (OSM or Esri satellite basemaps), submits it, sees loading/progress and error states, and the response overlays the selected land (blue), catchment boundary (green dashed), pond marker (red), and DEM contours (grey, toggleable). The frontend performs **no calculations** — all terrain, hydrology, rainfall, and water computations happen in the backend.
+
 ---
 
 ## Processing Methodology
@@ -306,6 +383,29 @@ flowchart TD
    - **Metric Area & Polygonization (`polygonize_catchment`)**: Aggregates contributing cells into metric polygons using Shapely `box`, unions them via `unary_union`, transforms the boundary back to WGS84 `(longitude, latitude)`, and exports as a standard GeoJSON Feature polygon.
    - **Area Calculation**: Area is accurately computed in projected metric units:
      $$\text{Area } (m^2) = N_{\text{cells}} \times \text{resolution}^2, \quad \text{Area } (\text{ha}) = \frac{\text{Area } (m^2)}{10,000}$$
+
+The unified `/analyzePondSite` workflow (automatic DEM path) adds the following stages on top of the shared terrain/hydrology core:
+
+7. **Contour Generation from DEM (`ContourGenerationService.generate_contours`)**:
+   - Vectorized marching squares over the elevation grid at a configurable interval (default 5 m; minimum 1 m — finer intervals are rejected because they would imply precision the DEM cannot support).
+   - Segments are chained into LineStrings (closed rings stay closed) and converted to WGS84 GeoJSON `FeatureCollection` for direct frontend rendering.
+   - Level count is capped at 50; the interval coarsens automatically for very high-relief areas.
+
+8. **Land-Constrained Candidate Siting (DEM path)**:
+   - The selected land polygon is rasterized onto the terrain grid (`TerrainService.mask_cells_within_polygon`, cell-center containment via `shapely.contains_xy`).
+   - Candidates are chosen **only** from masked cells; the catchment feeding them is **not** clipped to the land.
+   - The DEM path uses the documented flow-weighted scoring profile: `slope_weight = 0.35`, `elevation_weight = 0.15`, `flow_weight = 0.50` — preferring locations with meaningful upstream flow convergence over simply the lowest elevation. Weights are returned in the response (`scoring_config`) for transparency.
+
+9. **Historical Rainfall (`RainfallService.get_rainfall`)**:
+   - Primary: **Open-Meteo Historical Weather API** (ERA5/ERA5-Land, ~9–11 km grid) — free, no API key, daily precipitation for the last 10 complete years → mean annual depth + monthly climatology.
+   - Fallback: **NASA POWER agroclimatology** (`PRECTOTCORR`, ~0.5° grid) — annual mean daily precipitation × 365.25.
+   - Both providers are free and key-less; identical requests are cached in memory and on disk (`data/cache/rainfall/`) with coordinates rounded to 2 decimals (~1.1 km).
+
+10. **Water Volume (`WaterVolumeService.estimate`) and Indicative Storage (`PondStorageService.suggest_pond_storage`)**:
+    - Theoretical runoff: $\text{Runoff (m}^3\text{)} = \text{Catchment Area (m}^2\text{)} \times \dfrac{\text{Rainfall (mm)}}{1000} \times C_{\text{runoff}}$
+    - Expected collectible water: $\text{Collectible} = \text{Runoff} \times \eta_{\text{collection}}$
+    - Defaults (documented, overridable per request): $C_{\text{runoff}} = 0.30$ (mid-range of the 0.2–0.5 typical values for small rural catchments, USDA SCS / FAO guidance) and $\eta_{\text{collection}} = 0.75$ (allowance for conveyance, seepage and evaporation losses). Theoretical runoff and collectible water are reported **separately**.
+    - Indicative storage sizes a truncated-pyramid basin ($V = d\,(A_{bottom}+A_{top})/2$, side slope 2H:1V, depth 3 m) whose capacity matches the collectible inflow. It is clearly labeled as conceptual sizing, **not** engineering design, and is kept strictly separate from runoff volume.
 
 ---
 
@@ -430,9 +530,34 @@ flowchart TD
 ## Assumptions & Limitations
 
 1. **Surface Topography Only**: Hydrological modeling assumes overland gravity-driven surface runoff based solely on the reconstructed elevation model. It does not account for sub-surface infiltration, groundwater tables, evaporation rates, or subterranean pipe networks.
-2. **Artificial Obstructions**: Existing man-made culverts, road bridges, ditches, or embankments not captured in the contour elevation data are not represented in the raster surface.
-3. **Linear DEM Interpolation**: Interpolation between contour lines utilizes linear barycentric interpolation over Delaunay triangles, which represents natural terrain well but may smooth sharp breaklines or micro-topographic features.
-4. **Preliminary Nature**: This backend is designed for macro-level preliminary siting and planning.
+2. **Artificial Obstructions**: Existing man-made culverts, road bridges, ditches, or embankments not captured in the elevation data are not represented in the raster surface.
+3. **DEM Resolution & Pond-Site Precision**: The automatic DEM path uses ~30 m resolution global data (AWS Terrain Tiles, resampled to `DEM_TARGET_RESOLUTION_M`). Pond-site precision is therefore limited to roughly one grid cell (~30 m), and derived elevations/slopes are planning-level approximations. Contour intervals below 1 m are refused to avoid implying unsupported precision.
+4. **Rainfall Data**: Rainfall comes from reanalysis/climatology products (ERA5 via Open-Meteo, ~9–11 km; NASA POWER, ~0.5°) — gridded estimates, not gauge measurements. Annual means smooth year-to-year variability and do not capture extreme-event dynamics.
+5. **Runoff Coefficient & Collection Efficiency**: The defaults (0.30 and 0.75) are documented planning assumptions within published typical ranges; they are not measured values for any specific catchment and can be overridden per request.
+6. **Storage Sizing Is Conceptual**: The pond-storage module produces an indicative basin geometry from an average-end-area frustum model with no freeboard, lining, or inlet/outlet structures. It is **not** a certified engineering design.
+7. **Linear DEM Interpolation** (KML path): Interpolation between contour lines utilizes linear barycentric interpolation over Delaunay triangles, which represents natural terrain well but may smooth sharp breaklines or micro-topographic features.
+8. **Preliminary Nature**: This system is designed for macro-level preliminary siting and planning.
+
+## Environment Variables
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `MAX_LAND_AREA_SQ_KM` | `100` | Maximum accepted selected-land area |
+| `DEM_PROVIDER` | `aws_terrain_tiles` | Primary DEM provider (`aws_terrain_tiles` or `opentopography`) |
+| `OPEN_TOPOGRAPHY_API_KEY` | *(empty)* | Enables the OpenTopography provider (free key) |
+| `OPEN_TOPOGRAPHY_DATASET` | `SRTMGL1` | OpenTopography `demtype` |
+| `ANALYSIS_BUFFER_METERS` | `500` | Buffer around the land bbox defining the analysis extent |
+| `DEM_TARGET_RESOLUTION_M` | `30` | Target DEM grid resolution |
+| `DEM_REQUEST_TIMEOUT_S` | `45` | External DEM request timeout |
+| `DEM_CACHE_DIR` | `data/cache/dem` | DEM disk cache directory |
+| `DEM_MAX_TILES` | `64` | Maximum tiles per acquisition (auto-coarsens zoom) |
+| `DEM_MAX_GRID_DIM` | `500` | Maximum grid dimension (auto-coarsens resolution) |
+| `DEM_MAX_EXTENT_KM` | `15` | Maximum analysis-extent size |
+| `RAINFALL_YEARS_WINDOW` | `10` | Historical window length for rainfall statistics |
+| `RAINFALL_REQUEST_TIMEOUT_S` | `30` | External rainfall request timeout |
+| `RAINFALL_CACHE_DIR` | `data/cache/rainfall` | Rainfall disk cache directory |
+| `MAX_UPLOAD_SIZE_MB` | `20` | KML/KMZ upload size limit |
+| `MAX_LAND_VERTICES` | `2000` | Maximum vertices per land polygon |
 
 ---
 
@@ -459,23 +584,42 @@ pytest tests/ -v
 - **Hydrological D8 Analysis**: Priority-Flood pit filling, flow direction downhill routing, flow accumulation monotonicity, drainage snapping with distance tie-breaking.
 - **Dynamic Input Variance**: Proves that varying input contour terrain produces strictly different candidate locations, snapped outlets, and catchment boundaries.
 - **End-to-End Integration**: Validates end-to-end execution against the sample dataset `data/sample/contours_1m.kml`.
+- **Land Selection**: Valid polygons/MultiPolygons/holes/3D positions and every validation failure mode (unclosed rings, zero area, antimeridian, oversize).
+- **DEM Acquisition**: Provider selection & fallback, deterministic caching (memory + disk), NoData handling, extent/grid safeguards, zoom selection, AAIGrid parsing, bilinear sampling, plus an opt-in live network test (`RUN_LIVE_DEM_TESTS=1`).
+- **Contour Generation**: Marching-squares levels, closed rings on synthetic cones, interval caps, DEM→TerrainModel bridge.
+- **Land-Constrained Siting & Catchment**: Candidates always inside the selected land; catchment demonstrably extends beyond it; precomputed-grid equivalence with the legacy path.
+- **Rainfall**: Response parsing (Open-Meteo & NASA POWER), provider fallback, caching, coordinate rounding, failure handling.
+- **Water & Storage**: Unit conversion, explicit coefficient handling, efficiency separation, capacity ≈ inflow sizing, invalid-input rejection.
+- **Unified API**: Full JSON workflow, KML fallback path, explicit-parameter override, terrain-source exclusivity, sub-cell selection rejection.
+- **Limits & Frontend**: Upload-size and vertex-count guards; static frontend serving (`/app/`).
 
 ---
 
-## Demonstration Using Provided Sample File
+## Demonstration
 
-### Using `curl`
+### End-to-end workflow (automatic DEM path — no file upload)
+
+```bash
+curl -X POST "https://pond-catchment-backend.onrender.com/api/v1/analyzePondSite" \
+  -F 'request={"geometry": {"type": "Polygon", "coordinates": [[[81.290, 21.245], [81.296, 21.245], [81.296, 21.250], [81.290, 21.250], [81.290, 21.245]]]}}'
+```
+
+The response contains the selected-land metrics, acquired DEM source, terrain/contour GeoJSON, the pond candidate, the catchment polygon, rainfall statistics, runoff/collectible-water figures, and indicative pond storage. Repeat calls for the same area are served from cache (`cache_hit: true`).
+
+### Frontend walkthrough
+
+1. Open `/app/` on the deployed service (or `http://localhost:8000/app/` locally).
+2. Choose a basemap (OpenStreetMap or Esri satellite).
+3. Click **Draw polygon** and click (or double-click) vertices around the village land; press **Finish** to close (minimum 3 vertices).
+4. Click **Analyze selected area** — the loading state shows while the backend acquires the DEM, runs hydrology, fetches rainfall, and computes water volumes.
+5. The map overlays the selected land (blue), catchment boundary (green dashed), pond marker (red), and DEM contours (grey, toggleable); the results panel shows all metrics with sources and assumptions.
+
+### KML/KMZ fallback (backward compatibility)
+
 ```bash
 curl -X POST "https://pond-catchment-backend.onrender.com/api/v1/findCatchment" \
   -F "file=@data/sample/contours_1m.kml"
 ```
-
-### Using Swagger UI
-1. Open [https://pond-catchment-backend.onrender.com/docs](https://pond-catchment-backend.onrender.com/docs).
-2. Expand `POST /api/v1/findCatchment`.
-3. Click **Try it out**.
-4. Choose `data/sample/contours_1m.kml`.
-5. Click **Execute** to view the parsed contours, reconstructed terrain metadata, candidate rankings, and the GeoJSON catchment polygon.
 
 ---
 

@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import numpy as np
+import shapely
 from pyproj import Transformer
 from scipy.interpolate import griddata
 from fastapi import HTTPException, status
+from shapely.ops import transform as shapely_transform
 
 from app.schemas.catchment import (
     GeographicExtent,
@@ -12,6 +14,42 @@ from app.schemas.catchment import (
     SlopeMetadata,
     TerrainMetadata,
 )
+
+
+@dataclass
+class DEMSourceInfo:
+    """Provenance of an automatically acquired DEM."""
+
+    provider: str
+    dataset: str
+    attribution: str
+    zoom_level: Optional[int] = None  # only for slippy-tile providers
+
+
+@dataclass
+class DEMData:
+    """Elevation grid resampled onto a regular projected (UTM) grid.
+
+    This is the "acquired DEM" handed to the terrain pipeline; it carries the same
+    geometric semantics as a reconstructed contour terrain (metric grid + bounds).
+    """
+
+    elevation_grid: np.ndarray  # (rows, cols) float32, meters
+    crs: str
+    resolution_meters: float
+    bounds: Tuple[float, float, float, float]  # (min_x, max_x, min_y, max_y) projected
+    geographic_extent: GeographicExtent  # WGS84 analysis extent (land bbox + buffer)
+    source: DEMSourceInfo
+    nodata_cells_filled: int = 0
+    cache_hit: bool = False
+
+    @property
+    def rows(self) -> int:
+        return int(self.elevation_grid.shape[0])
+
+    @property
+    def cols(self) -> int:
+        return int(self.elevation_grid.shape[1])
 
 
 @dataclass
@@ -72,6 +110,46 @@ class TerrainService:
         dy, dx = np.gradient(elevation_grid, resolution_meters, resolution_meters)
         slope_rad = np.arctan(np.sqrt(dx**2 + dy**2))
         return np.degrees(slope_rad)
+
+    @classmethod
+    def reconstruct_terrain_from_dem(cls, dem: DEMData) -> TerrainModel:
+        """Build a TerrainModel directly from an acquired DEM (no contour reconstruction)."""
+        grid = np.asarray(dem.elevation_grid, dtype=np.float64)
+        if grid.ndim != 2 or grid.shape[0] < 2 or grid.shape[1] < 2:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Acquired DEM grid is too small for terrain analysis.",
+            )
+        slope_grid = cls.calculate_slope(grid, dem.resolution_meters)
+        return TerrainModel(
+            elevation_grid=grid,
+            crs=dem.crs,
+            grid_resolution_meters=dem.resolution_meters,
+            bounds=dem.bounds,
+            geographic_extent=dem.geographic_extent,
+            min_elevation=float(grid.min()),
+            max_elevation=float(grid.max()),
+            slope_grid=slope_grid,
+        )
+
+    @staticmethod
+    def mask_cells_within_polygon(terrain: TerrainModel, polygon_wgs84) -> np.ndarray:
+        """Rasterize a WGS84 polygon onto the terrain grid (cell-center containment).
+
+        Cell coordinates use the same node mapping as the rest of the pipeline
+        (cell c at projected x = min_x + c * resolution). Returns a boolean grid of
+        the same shape; the result may be all-False when the polygon does not
+        overlap the terrain extent.
+        """
+        to_utm = Transformer.from_crs("EPSG:4326", terrain.crs, always_xy=True)
+        polygon_utm = shapely_transform(to_utm.transform, polygon_wgs84)
+        min_x, _, min_y, _ = terrain.bounds
+        res = terrain.grid_resolution_meters
+        xs = min_x + np.arange(terrain.cols, dtype=np.float64) * res
+        ys = min_y + np.arange(terrain.rows, dtype=np.float64) * res
+        grid_x, grid_y = np.meshgrid(xs, ys)
+        mask = shapely.contains_xy(polygon_utm, grid_x.ravel(), grid_y.ravel())
+        return mask.reshape(terrain.rows, terrain.cols)
 
     @classmethod
     def reconstruct_terrain(

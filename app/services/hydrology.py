@@ -232,6 +232,9 @@ class HydrologyService:
         terrain: TerrainModel,
         candidate: PondCandidateSite,
         snap_radius_meters: float = 100.0,
+        conditioned_dem: Optional[np.ndarray] = None,
+        flow_direction: Optional[np.ndarray] = None,
+        flow_accumulation: Optional[np.ndarray] = None,
     ) -> CatchmentResult:
         if (
             candidate.latitude < terrain.geographic_extent.min_latitude
@@ -244,9 +247,23 @@ class HydrologyService:
                 detail="Candidate location falls outside the analyzed terrain boundary.",
             )
 
-        filled_dem = cls.condition_dem(terrain.elevation_grid)
-        flow_dir = cls.calculate_flow_direction(filled_dem, terrain.grid_resolution_meters)
-        accumulation = cls.calculate_flow_accumulation(flow_dir, filled_dem)
+        # Precomputed grids may be shared by the caller (e.g. the DEM pipeline already
+        # computed them for candidate scoring) to avoid duplicate CPU-heavy work.
+        filled_dem = (
+            conditioned_dem
+            if conditioned_dem is not None
+            else cls.condition_dem(terrain.elevation_grid)
+        )
+        flow_dir = (
+            flow_direction
+            if flow_direction is not None
+            else cls.calculate_flow_direction(filled_dem, terrain.grid_resolution_meters)
+        )
+        accumulation = (
+            flow_accumulation
+            if flow_accumulation is not None
+            else cls.calculate_flow_accumulation(flow_dir, filled_dem)
+        )
 
         to_proj = Transformer.from_crs("EPSG:4326", terrain.crs, always_xy=True)
         cand_x, cand_y = to_proj.transform(candidate.longitude, candidate.latitude)

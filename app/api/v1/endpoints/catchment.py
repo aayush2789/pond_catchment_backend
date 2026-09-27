@@ -1,4 +1,5 @@
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from app.core.config import settings
 from app.schemas.catchment import ContourInspectionResponse
 from app.services.candidate_selection import CandidateSelectionService
 from app.services.hydrology import HydrologyService
@@ -25,6 +26,16 @@ async def find_catchment(
 ) -> ContourInspectionResponse:
     content = await file.read()
     filename = file.filename or "upload.kml"
+
+    max_upload_bytes = int(settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024)
+    if len(content) > max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Uploaded file exceeds the maximum accepted size of "
+                f"{settings.MAX_UPLOAD_SIZE_MB} MB."
+            ),
+        )
 
     # 1. KML extraction & archive unpacking
     kml_bytes, kml_entry_name, ext = ContourParserService.extract_kml_payload(content, filename)

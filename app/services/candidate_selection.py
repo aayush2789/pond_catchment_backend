@@ -19,12 +19,23 @@ class CandidateScoringConfig:
 
 
 class CandidateSelectionService:
+    # Weighted scoring profile used when flow accumulation is available (DEM path):
+    # drainage convergence/upstream flow is the dominant factor, followed by slope
+    # suitability; relative elevation acts as a tie-breaking depression indicator.
+    # The weights are exposed in API responses so the scoring stays explainable.
+    FLOW_WEIGHTED_CONFIG = CandidateScoringConfig(
+        slope_weight=0.35,
+        elevation_weight=0.15,
+        flow_weight=0.50,
+    )
+
     @classmethod
     def identify_candidates(
         cls,
         terrain: TerrainModel,
         config: Optional[CandidateScoringConfig] = None,
         flow_accumulation: Optional[np.ndarray] = None,
+        candidate_mask: Optional[np.ndarray] = None,
     ) -> List[PondCandidateSite]:
         cfg = config or CandidateScoringConfig()
 
@@ -68,6 +79,13 @@ class CandidateSelectionService:
             work_grid[-buf:, :] = 0.0
             work_grid[:, :buf] = 0.0
             work_grid[:, -buf:] = 0.0
+
+        if candidate_mask is not None:
+            if candidate_mask.shape != work_grid.shape:
+                raise ValueError("candidate_mask shape must match the terrain grid shape")
+            work_grid[~candidate_mask] = 0.0
+            if not candidate_mask.any():
+                return []
 
         cell_radius = max(1, int(cfg.min_distance_meters / terrain.grid_resolution_meters))
         min_x, max_x, min_y, max_y = terrain.bounds

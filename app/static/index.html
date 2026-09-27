@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Village Pond Planning System</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Village Pond Planning System</h1>
+    <p class="subtitle">Select a land area on the map — terrain, pond site, catchment, rainfall and water volume are computed by the backend.</p>
+  </header>
+  <main>
+    <div id="map"></div>
+    <aside id="panel">
+      <section class="card">
+        <h2>1. Select land</h2>
+        <div class="button-row">
+          <button id="startDraw" type="button">Draw polygon</button>
+          <button id="finishDraw" type="button" disabled>Finish</button>
+          <button id="clearAll" type="button" disabled>Clear</button>
+        </div>
+        <p id="drawHint" class="hint">Click (or double-click) to add vertices, then press Finish to close the polygon. Minimum 3 vertices.</p>
+      </section>
+
+      <section class="card">
+        <h2>2. Analyze</h2>
+        <button id="analyzeBtn" type="button" disabled>Analyze selected area</button>
+        <label class="checkbox-row"><input type="checkbox" id="showContours" checked /> Show terrain contours</label>
+        <div id="status" class="status" hidden>
+          <span class="spinner"></span><span id="statusText">Analyzing…</span>
+        </div>
+        <div id="error" class="error" hidden></div>
+      </section>
+
+      <section class="card" id="results" hidden>
+        <h2>3. Results</h2>
+
+        <div class="result-block">
+          <h3>Selected land</h3>
+          <div class="legend-item"><span class="swatch land"></span> Construction area</div>
+          <p id="resLand"></p>
+        </div>
+
+        <div class="result-block">
+          <h3>Suggested pond location</h3>
+          <div class="legend-item"><span class="swatch pond"></span> Pond site</div>
+          <p id="resPond"></p>
+        </div>
+
+        <div class="result-block">
+          <h3>Catchment area</h3>
+          <div class="legend-item"><span class="swatch catchment"></span> Upstream contributing area (may extend beyond the land)</div>
+          <p id="resCatchment"></p>
+        </div>
+
+        <div class="result-block">
+          <h3>Rainfall</h3>
+          <p id="resRainfall"></p>
+        </div>
+
+        <div class="result-block">
+          <h3>Expected water volume</h3>
+          <p id="resWater"></p>
+        </div>
+
+        <div class="result-block">
+          <h3>Indicative pond storage</h3>
+          <p id="resStorage"></p>
+        </div>
+
+        <p class="attribution" id="resSources"></p>
+      </section>
+    </aside>
+  </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

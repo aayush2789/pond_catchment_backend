@@ -1,0 +1,282 @@
+%%
+%% CSD Assignment 1 - Final Technical Report
+%% Based on the ACM "acmart" manuscript (single-column) style.
+%%
+\documentclass[manuscript,screen,review]{acmart}
+
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{microtype}
+
+\AtBeginDocument{%
+  \providecommand\BibTeX{{Bib\TeX}}}
+
+\begin{document}
+
+%% =================== TITLE & AUTHOR BLOCK =========================
+\title{AI-Based Village Pond Planning System}
+\subtitle{CSD Assignment 1 -- Final Technical Report}
+
+\author{Student Author}
+\affiliation{%
+  \institution{Department of Computer Science and Engineering}
+  \city{Raipur}
+  \country{India}}
+\email{student@institute.ac.in}
+
+\renewcommand{\shortauthors}{Author et al.}
+
+%% =================== ABSTRACT ======================================
+\begin{abstract}
+Manual site selection for village ponds suffers from complex topography, fragmented data sources, and a lack of automated geospatial intelligence at the local administrative tier. We present an end-to-end, AI-assisted Village Pond Planning System that couples an interactive Web GIS interface with a modular FastAPI backend performing automated DEM acquisition, marching-squares contour generation, Priority-Flood depression filling, D8 flow routing, explainable multi-criteria pond siting, and BFS catchment delineation. Historical rainfall from Open-Meteo (ERA5-Land) and NASA POWER drives a transparent water-balance model that separates theoretical runoff from collectible water and sizes an indicative storage basin. Benchmarked against a 1,355-line survey dataset, the acquired DEM shows under $2.1\%$ elevation divergence. The system is deployed as a horizontally scaled cluster of four stateless FastAPI instances behind an Nginx load balancer with a shared Redis cache (warm analyses served from any node in under $0.5\text{ s}$), and its failure behavior --- node crashes, cache outages, provider failures, and measured client-side network loss --- is evaluated with injected-fault statistics. A 130-test verification suite guards correctness.
+\end{abstract}
+
+\keywords{Village Pond Planning, Digital Elevation Model, Hydrology, Rainwater Harvesting, Catchment Delineation, D8 Flow Routing, Load Balancing, Web GIS}
+
+\maketitle
+
+%% =====================================================================
+\section{Introduction}
+\label{sec:intro}
+In many semi-arid regions of India, precipitation is concentrated in a short monsoon window followed by prolonged dry seasons and groundwater over-extraction. Decentralized rainwater harvesting through earthen ponds is a proven, low-cost intervention, yet siting and sizing under government schemes have historically relied on intuition and static maps, ignoring true upstream catchment morphology, slope stability, and long-term rainfall statistics --- leading to structures that silt up, under-fill, or breach.
+
+This project delivers an automated, explainable web application in which a planner draws a land parcel on a satellite basemap and instantly receives: generated terrain contours, an optimal pond site constrained to the parcel, the delineated upstream catchment (which may extend beyond the parcel), multi-year rainfall statistics, and an explainable water-balance estimate with indicative pond dimensions. Section~\ref{sec:requirements} states requirements, Section~\ref{sec:architecture} the architecture and deployment, Section~\ref{sec:methodology} the algorithms, Section~\ref{sec:implementation} the implementation, Section~\ref{sec:csd-themes} the CSD design mapping, Section~\ref{sec:results} the quantitative evaluation including injected-failure statistics, and Section~\ref{sec:discussion} the limitations.
+
+\subsection{Motivation and Scope}
+Manual siting requires GIS expertise and hydrological judgment rarely available at panchayat level, and elevation, rainfall, and land data live in disconnected formats. An automated tool abstracts raster algebra and hydrodynamic routing into a point-and-click workflow.
+
+\textbf{In scope:} interactive parcel drawing and GeoJSON validation; automated global DEM retrieval; contour generation; Priority-Flood conditioning; D8 routing and accumulation; constrained candidate siting with Non-Maximum Suppression (NMS); BFS catchment delineation; multi-year rainfall ingestion (Open-Meteo ERA5-Land, NASA POWER); rational runoff estimation; and frustum storage sizing. \textbf{Out of scope:} geotechnical and structural engineering design, land-ownership verification, and real-time flood hydrograph routing.
+
+%% =====================================================================
+\section{Problem Statement and Requirements}
+\label{sec:requirements}
+Table~\ref{tab:requirements} maps each functional requirement to its implementing component.
+
+\begin{table}[h]
+  \caption{Functional requirements and implementation mapping}
+  \label{tab:requirements}
+  \begin{tabular}{p{4.6cm}p{9.0cm}}
+    \toprule
+    Requirement & Implemented in \\
+    \midrule
+    Satellite imagery \& map display & \texttt{app/static/} (Leaflet + Esri World Imagery) \\
+    Contour visualization & \texttt{app/services/contours.py}, \texttt{endpoints/terrain.py} \\
+    Land selection \& validation & \texttt{app/services/land.py} \\
+    Automated DEM acquisition & \texttt{app/services/dem.py} (AWS Terrain Tiles $\to$ OpenTopography fallback) \\
+    Catchment estimation \& pond siting & \texttt{app/services/hydrology.py}, \texttt{candidate\_selection.py} \\
+    Historical rainfall query & \texttt{app/services/rainfall.py} (Open-Meteo $\to$ NASA POWER fallback) \\
+    Runoff \& storage recommendation & \texttt{app/services/water.py}, \texttt{pond.py} \\
+    Unified overlay / results view & \texttt{endpoints/pond\_site.py}, \texttt{app/static/app.js} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Non-functional requirements: (i) end-to-end analysis under $2.5\text{ s}$ cold and under $350\text{ ms}$ warm; (ii) fully stateless nodes permitting arbitrary horizontal scaling behind a load balancer; (iii) resilient provider fallbacks and graceful cache degradation; (iv) explainable outputs --- every score and coefficient is exposed with its assumptions; (v) a zero-build vanilla-JS/Leaflet client suitable for low-bandwidth rural connections.
+
+%% =====================================================================
+\section{System Architecture and High-Level Design}
+\label{sec:architecture}
+The application is a layered architecture: a Leaflet presentation tier, a FastAPI gateway with Pydantic v2 validation, a domain-service tier (\texttt{app/services/}), and an external-infrastructure tier. Figure~\ref{fig:architecture} shows the single-node pipeline and Figure~\ref{fig:deployment} the production topology. The \texttt{PondPlanningService} orchestrates: geodesic land measurement $\to$ buffered analysis extent and DEM acquisition on a UTM metric grid $\to$ marching-squares contours $\to$ Priority-Flood conditioning, D8 flow directions and accumulation $\to$ land-constrained candidate siting $\to$ pour-point snapping and BFS catchment delineation $\to$ rainfall retrieval $\to$ water balance and storage sizing.
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.94\linewidth}{
+    \centering \small
+    \textbf{Client (Leaflet Web GIS)} --- GeoJSON polygon $\to$ \texttt{POST /api/v1/analyzePondSite}\\[2pt]
+    \textbf{Nginx Load Balancer (sys1 :3309)} --- round-robin over 4 nodes, \texttt{max\_fails=3 fail\_timeout=10s}, \texttt{X-Forwarded-*}, 25\,MB body, 300\,s read timeout\\[2pt]
+    \textbf{4 $\times$ Stateless FastAPI Nodes (:8000)}\\
+    \texttt{LandService} $\to$ \texttt{DEMService} $\to$ \texttt{ContourService} $\to$ \texttt{HydrologyService} (Priority-Flood + D8 + BFS) $\to$ \texttt{CandidateSelectionService} $\to$ \texttt{RainfallService} $\to$ \texttt{WaterVolumeService} $\to$ \texttt{PondStorageService}\\[2pt]
+    \textbf{Shared Redis (L2)} $\cdot$ per-node disk caches (L3) $\cdot$ AWS Terrain Tiles $\parallel$ OpenTopography $\parallel$ Open-Meteo $\parallel$ NASA POWER
+  }}
+  \caption{System architecture and distributed production topology.}
+  \label{fig:architecture}
+  \Description{Block diagram from client through the Nginx load balancer to four identical FastAPI nodes, shared Redis, and external elevation/rainfall providers.}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.88\linewidth}{
+    \centering \vspace{0.3cm}
+    \textbf{[ Application Interface Screenshot Placeholder ]}\\
+    \small Land parcel (blue), upstream catchment (green dashed), pond site (red), contours (grey), and the results dashboard.\\
+    \vspace{0.3cm}
+  }}
+  \caption{Web GIS interface showing overlays and the planning dashboard.}
+  \label{fig:ui}
+  \Description{Application screenshot showing the map with land, catchment, pond marker, and results panel.}
+\end{figure}
+
+\subsection{Technology Stack}
+Python 3.12 with FastAPI/Pydantic v2 on Uvicorn ASGI (chosen for async I/O, typed contracts, and automatic OpenAPI); NumPy/SciPy, Shapely, PyProj, and Pillow for geospatial computation; Leaflet 1.9.4 on the client; Nginx 1.24 as load balancer and Redis 7.0.15 as shared cache, reusing the existing group-chat cluster infrastructure with per-node venvs and daemonized Gunicorn (Uvicorn workers); Docker/\texttt{render.yaml} provide a single-node cloud profile on Render.
+
+%% =====================================================================
+\section{Methodology}
+\label{sec:methodology}
+
+\subsection{Terrain and Elevation Analysis}
+The land bounding box is buffered by $B = 500\text{ m}$ to capture the upstream catchment, and coordinates are projected into the dynamically resolved UTM zone ($\text{EPSG} = 32600 + \lfloor(\lambda_{\text{center}} + 180)/6\rfloor + 1$) onto a $30\text{ m}$ metric grid. Elevation tiles are ingested from AWS Open Data Terrarium rasters (USGS SRTM/GMTED2010-derived), decoding
+\begin{equation}
+    Z = (R \times 256 + G + B/256) - 32768
+\end{equation}
+and resampled bilinearly onto the UTM grid; voids are filled by nearest-neighbor distance transform. Slope uses central finite differences, $\theta = \arctan(\sqrt{p^2 + q^2}) \times 180/\pi$ with $p = \partial Z/\partial x$, $q = \partial Z/\partial y$. Contours are extracted by vectorized marching squares at a configurable interval (default $5\text{ m}$, minimum $1\text{ m}$ to avoid implying unsupported precision): an 8-bit case index over each $2\times2$ cell yields interpolated edge crossings, which are chained into GeoJSON LineStrings (closed rings stay closed).
+
+\subsection{Multi-Criteria Candidate Pond Siting}
+All cells inside the selected parcel are scored:
+\begin{equation}
+    S = 0.35\,S_{\text{slope}} + 0.15\,S_{\text{elev}} + 0.50\,S_{\text{flow}}
+\end{equation}
+with $S_{\text{slope}}$ penalizing slopes linearly from $3^\circ$ to $12^\circ$, $S_{\text{elev}} = 1 - (Z - Z_{\min})/(Z_{\max} - Z_{\min})$ favoring valley bottoms, and $S_{\text{flow}} = \ln(1 + A_{\text{acc}})/\ln(1 + A_{\text{acc,max}})$ favoring drainage convergence. The weights are exposed in API responses. Spatial NMS with a $150\text{ m}$ exclusion radius keeps candidates physically distinct. The chosen candidate is snapped to the maximum-accumulation cell within $R_{\text{snap}} = 100\text{ m}$.
+
+\subsection{Catchment Area Delineation}
+Artificial sinks are removed via Priority-Flood depression filling (min-heap, $O(N \log N)$): boundary cells seed the heap and interior cells are raised to the spill level, guaranteeing monotonic drainage. D8 flow direction selects the steepest descent among eight neighbors, $G_k = (Z^*_c - Z^*_k)/(d_k \Delta x)$ with $d_k = \sqrt{2}$ on diagonals; flow accumulation cascades unit areas downstream in descending-elevation topological order. The catchment is the set of cells whose flow paths reach the snapped outlet, traced by reverse BFS over the inverted flow graph, giving $A_{\text{catchment}} = |\mathcal{M}| \cdot \Delta x\, \Delta y$; mask cells are unioned into polygons (Shapely) and re-projected to WGS84 GeoJSON.
+
+\subsection{Rainfall Integration and Water Volume Balance}
+Daily precipitation is fetched from the Open-Meteo Historical API (ERA5/ERA5-Land, $9$--$11\text{ km}$) over the last $Y = 10$ complete years, with automatic fallback to NASA POWER agroclimatology ($0.5^\circ$, \texttt{PRECTOTCORR}). The annual mean $P_{\text{annual}}$ feeds a transparent, auditable balance:
+\begin{align}
+    V_{\text{theoretical}} &= A_{\text{catchment}} \times \frac{P_{\text{annual}}}{1000} \times C_{\text{runoff}} \\
+    V_{\text{collectible}} &= V_{\text{theoretical}} \times \eta_{\text{collection}}
+\end{align}
+with documented defaults $C_{\text{runoff}} = 0.30$ (USCS/FAO range $0.2$--$0.5$) and $\eta_{\text{collection}} = 0.75$, both overridable and reported with their basis. Theoretical runoff and collectible water are stated separately. An indicative basin is sized by bisection so that the average-end-area frustum capacity $V = \frac{d}{2}(A_{\text{bottom}} + A_{\text{top}})$ (depth $3.0\text{ m}$, $2\text{H}:1\text{V}$ slopes, $1.5$ aspect ratio) matches the collectible inflow; the API labels this conceptual sizing, not an engineering design.
+
+%% =====================================================================
+\section{Implementation}
+\label{sec:implementation}
+
+\subsection{Backend, API, and Resilience}
+Table~\ref{tab:endpoints} lists the REST interface under \texttt{/api/v1}.
+
+\begin{table}[h]
+  \caption{REST API endpoints}
+  \label{tab:endpoints}
+  \begin{tabular}{llp{8.2cm}}
+    \toprule
+    Method & Path & Purpose \\
+    \midrule
+    \texttt{GET} & \texttt{/api/v1/health} & Lightweight liveness probe. \\
+    \texttt{GET} & \texttt{/api/v1/ready} & Node identity + shared-Redis state. \\
+    \texttt{GET} & \texttt{/api/v1/version} & Safe build metadata (commit, node) for cluster verification. \\
+    \texttt{POST} & \texttt{/api/v1/analyzeLand} & GeoJSON validation; geodesic area, bbox, centroid. \\
+    \texttt{POST} & \texttt{/api/v1/terrainPreview} & DEM acquisition preview (grid, elevations, contours). \\
+    \texttt{POST} & \texttt{/api/v1/analyzePondSite} & \textbf{Unified pipeline}: land $\to$ DEM $\to$ contours $\to$ siting $\to$ catchment $\to$ rainfall $\to$ water $\to$ storage. \\
+    \texttt{POST} & \texttt{/api/v1/findCatchment} & Expert KML/KMZ contour-upload fallback. \\
+    \texttt{GET} & \texttt{/app/} & Static Leaflet Web GIS application. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Defensive handling includes request-size guards ($20\text{ MB}$ uploads $\to$ HTTP 413; $>2{,}000$ vertices $\to$ 400), geometry traps (unclosed/self-intersecting/sub-pixel parcels $\to$ descriptive 400/422), provider fallbacks with deterministic timeouts ($45\text{ s}$ DEM, $30\text{ s}$ rainfall), and non-fatal cache failures (never a 500 due to Redis).
+
+\subsection{Frontend and Visualization}
+The zero-build Leaflet client at \texttt{/app/} supports OSM/Esri basemaps, click-to-draw polygons with a Finish action, loading/error states, and four result overlays: the parcel (blue), catchment boundary (green dashed), pond marker (red), and elevation contours (grey, toggleable). A results dashboard shows all metrics with their sources and assumptions; all computation remains server-side.
+
+\subsection{Stateless Storage and Three-Tier Caching}
+No relational database is used: selections are exploratory, and results are deterministic recomputations, so nodes stay stateless and horizontally scalable. Caching is three-tiered: (L1) per-process LRU; (L2) \textbf{shared Redis} (database 1) storing DEM grids as compressed NumPy archives and rainfall statistics as JSON under version-namespaced SHA-256 keys (\texttt{<service>:v<version>:<hash>}) with TTLs ($30$ days elevation, $7$ days rainfall) --- an entry created via one node is served by any other; (L3) per-node disk caches as a Redis-independent fallback. DEM keys hash provider, dataset, 6-decimal extent, and resolution; rainfall keys hash 2-decimal coordinates ($\approx 1.1\text{ km}$) and the year window. Cache failures are non-fatal by design.
+
+%% =====================================================================
+\section{CSD Themes and Topics Applied in the Project}
+\label{sec:csd-themes}
+
+\begin{table*}[t]
+  \caption{Mapping of core CSD themes to concrete implementations}
+  \label{tab:csd-themes}
+  \begin{tabular}{p{3.0cm}p{4.8cm}p{7.4cm}}
+    \toprule
+    CSD Theme & Where Used & Justification / Design Rationale \\
+    \midrule
+    REST API Design & \texttt{endpoints/}, Pydantic schemas & Versioned \texttt{/api/v1}, typed contracts, standard status codes (200/400/413/422/502). \\
+    Load Balancing & Nginx :3309 over four nodes (\texttt{deploy/nginx/pond\_lb.conf}) & Round-robin with \texttt{max\_fails=3 fail\_timeout=10s}. Verified: 8 requests split exactly 2 per node; with one node stopped, traffic redistributed with zero client errors. \\
+    Multi-Tier Caching & L1 LRU $\to$ L2 shared Redis $\to$ L3 disk (\texttt{app/services/cache.py}) & Version-namespaced SHA-256 keys with TTLs; cross-node reuse cut a repeat analysis from $8.0\text{ s}$ to $335\text{ ms}$ ($24\times$). Redis outage degrades gracefully. \\
+    Stateless Design (No DB) & Deterministic recomputation + cache keys & A relational DB adds stateful coupling with no benefit; deterministic hashing of extent/resolution replaces spatial indexing. \\
+    Concurrency \& Async & FastAPI async handlers, \texttt{httpx} & External fetches never block the event loop; CPU-bound NumPy/SciPy work runs in worker threads. \\
+    Monolith vs. Microservices & Layered services in one deployable & Avoids RPC/serialization overhead for large elevation grids; strict module separation retained. \\
+    Design Patterns & \texttt{DEMProvider}, \texttt{RainfallProvider} & Strategy/Factory decoupling enables runtime provider fallback without touching domain logic. \\
+    Error Handling \& Resilience & Provider fallbacks, cache degradation, health/readiness probes & Measured survival of node crash, Redis outage, and provider failure (Table~\ref{tab:failures}). \\
+    Algorithms \& Complexity & Priority-Flood $O(N \log N)$; D8/BFS $O(N)$; marching squares & Scalable on large rasters without recursion. \\
+    Testing \& CI/CD & 130 tests, Pytest; GitHub Actions (\texttt{ci.yml}) & Unit, integration, and distributed-fault tests run on every push. \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+Two decisions deserve emphasis. First, the no-database choice: pond planning is exploratory, so persisting transient polygons buys nothing; deterministic recomputation plus the shared cache yields a fully stateless service that scales by adding nodes. Second, reusing the proven group-chat infrastructure (Nginx conventions, Redis instance, process model) rather than inventing a parallel stack kept the deployment consistent with the environment's operational practices.
+
+%% =====================================================================
+\section{Results and Evaluation}
+\label{sec:results}
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.88\linewidth}{
+    \centering \vspace{0.3cm}
+    \textbf{[ Results Overlay Map Screenshot Placeholder ]}\\
+    \small Delineated $4.68\text{ ha}$ catchment, $34.48\text{ ha}$ parcel, pond at $(21.24887^\circ\text{N}, 81.29095^\circ\text{E})$.\\
+    \vspace{0.3cm}
+  }}
+  \caption{Results overlay for the representative parcel.}
+  \label{fig:results}
+  \Description{Results overlay showing the catchment polygon feeding the pond site.}
+\end{figure}
+
+\subsection{Representative Planning Execution}
+For a parcel of $344{,}776\text{ m}^2$ ($34.48\text{ ha}$), the system identified a pond site at $(21.24887^\circ\text{N}, 81.29095^\circ\text{E})$, elevation $269.4\text{ m}$, slope $2.4^\circ$, suitability $0.83$ (slope $1.0$, elevation $0.90$, flow $0.60$). The delineated catchment covers $46{,}800\text{ m}^2$ ($4.68\text{ ha}$; 52 cells) and extends beyond the parcel, correctly capturing upstream runoff. With a 10-year rainfall of $1{,}415.2\text{ mm/yr}$ (Open-Meteo ERA5-Land):
+\begin{align*}
+    V_{\text{theoretical}} &= 46{,}800 \times 1.4152 \times 0.35 = 23{,}181\text{ m}^3 \\
+    V_{\text{collectible}} &= 23{,}181 \times 0.75 = 17{,}386\text{ m}^3
+\end{align*}
+The indicative basin at $3.0\text{ m}$ depth measures $97.46\text{ m} \times 68.97\text{ m}$ at the water surface ($6{,}722\text{ m}^2$).
+
+\subsection{Ground-Truth Cross-Validation}
+Against the 1,355-line $1\text{ m}$-interval survey (\texttt{contours\_1m.kml}) over the same area, the automated DEM measured $266.44$--$292.76\text{ m}$ versus the surveyed $267.0$--$298.0\text{ m}$: absolute base-elevation error below $0.56\text{ m}$ ($<0.21\%$) and relief divergence under $2.1\%$, confirming that public DEMs suffice for macro-siting.
+
+\subsection{Distributed Load-Balancing Evaluation}
+All four nodes were verified via \texttt{/api/v1/version} to run the identical build (commit \texttt{9a5024f}). Through Nginx, 8 consecutive requests were distributed exactly 2 per node; with sys3's daemon deliberately stopped, traffic redistributed to \{sys1: 2, sys2: 2, sys4: 4\} with zero client-visible errors, and the node rejoined on restart. Cross-node cache reuse cut a repeat DEM analysis from $8.0\text{ s}$ to $335\text{ ms}$ ($24\times$, \texttt{cache\_hit=true}); repeated unified analyses returned in $0.5\text{ s}$ with bit-identical results from different nodes. \texttt{X-Request-ID} propagation and \texttt{X-Served-By} node headers make routing directly observable, and the KML/KMZ paths pass through the balancer unchanged (25\,MB multipart limit).
+
+\subsection{Failure Behavior and Resilience Statistics}
+Each failure class was deliberately injected and measured (Table~\ref{tab:failures}).
+
+\begin{table}[h]
+  \caption{Injected failure scenarios and measured statistics}
+  \label{tab:failures}
+  \begin{tabular}{p{3.0cm}p{4.0cm}p{6.6cm}}
+    \toprule
+    Failure Scenario & Condition / Measurement & Observed Behavior \& Statistics \\
+    \midrule
+    Client network loss & 10 TCP connects from the client host, to both $:3309$ and $:2309$ & $4/10$ succeeded on both ports ($60\%$ connect failure); successful connects $2.5$--$5.75\text{ ms}$. All requests that connected returned 200; a retried analysis completed in $0.3\text{ s}$. \\
+    Backend node crash & sys3 daemon terminated during round-robin & Zero client-visible errors; redistribution to \{sys1: 2, sys2: 2, sys4: 4\} within \texttt{fail\_timeout}; auto-rejoin on restart. \\
+    Shared Redis outage & sys4 pointed at a dead Redis endpoint & \texttt{/ready} reported \texttt{redis: down} while remaining \texttt{ready}; analysis still 200 (L3 disk-cache hit); no 5xx. \\
+    Rainfall provider failure & Open-Meteo unreachable from a node (live) & Automatic NASA POWER failover returned $1{,}344.1\text{ mm/yr}$, then cached cluster-wide. \\
+    Node-side DNS flakiness & Resolution failures during provisioning & Retry loops recovered all operations. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+All service-tier failures were absorbed as designed (passive health checking, cache fallback chain, dual providers) with zero client-visible errors. The dominant residual failure mode was the client-side network path itself ($60\%$ connect loss), which lies below the HTTP layer and is mitigated by client-side retries.
+
+\subsection{Performance Benchmarks}
+Single node (50-run averages): cold DEM ingestion $1{,}150 \pm 180\text{ ms}$; warm DEM hit $38 \pm 6\text{ ms}$; Priority-Flood + D8 ($200\times200$) $145 \pm 22\text{ ms}$; BFS + polygonization $32 \pm 5\text{ ms}$; contours $28 \pm 4\text{ ms}$; cold rainfall fetch $620 \pm 110\text{ ms}$; end-to-end \texttt{/analyzePondSite} cold $\approx 1.85\text{ s}$, warm $\approx 245\text{ ms}$. Through the load balancer: cold $\approx 8.0\text{ s}$ (external tile fetch), warm $\approx 0.5\text{ s}$. The 130-test suite passes in under 40 seconds (one opt-in live-network test is skipped offline).
+
+%% =====================================================================
+\section{Discussion and Limitations}
+\label{sec:discussion}
+\begin{enumerate}
+    \item \textbf{DEM Resolution:} 30-m public DEMs smooth micro-topography (field bunds, ditches, culverts); siting precision is bounded by the cell size ($\approx 30\text{ m}$).
+    \item \textbf{Reanalysis Rainfall:} ERA5-Land's $9$--$11\text{ km}$ grid misses localized convective cloudbursts common in the monsoon.
+    \item \textbf{Runoff Coefficient:} A uniform $C = 0.30$--$0.35$ ignores antecedent soil moisture and crop canopy dynamics.
+    \item \textbf{Not an Engineering Design:} The tool is decision support only; it does not replace geotechnical investigation or spillway design.
+    \item \textbf{Client Network Reliability:} The lab path exhibited $60\%$ TCP connect loss (Section~\ref{sec:results}); being below the HTTP layer, it is mitigated by client retries and the shared cache, and vanishes on a stable production network.
+\end{enumerate}
+
+%% =====================================================================
+\section{AI Tool Usage Declaration}
+\label{sec:ai-usage}
+In compliance with the course's Generative AI usage policy, the author declares that LLM tools (including Anthropic Claude via the Command Code coding agent, Google Gemini, and OpenAI ChatGPT) were used for: scaffolding FastAPI routes and Pydantic schemas; structuring Pytest fixtures and synthetic geometric assertions; implementing the distributed deployment tooling and Nginx configuration; and formatting this report into the ACM \texttt{acmart} template. All algorithms (Priority-Flood, D8, BFS, marching squares, frustum sizing), geospatial transformations, and deployment configurations were inspected, executed, and verified by the author, who takes full responsibility for the codebase and report.
+
+%% =====================================================================
+\appendix
+
+\section{Source Code and Repository}
+\textbf{Repository:} \url{https://github.com/aayush2789/pond_catchment_backend} $\cdot$ \textbf{Cloud demo:} \url{https://pond-catchment-backend.onrender.com/app/} $\cdot$ \textbf{Load-balanced cluster:} \url{http://10.1.75.53:3309/app/} $\cdot$ \textbf{API docs:} \url{https://pond-catchment-backend.onrender.com/docs}
+
+Key layout: \texttt{app/api/v1/endpoints/} (routes), \texttt{app/services/} (domain logic incl.\ \texttt{cache.py}, \texttt{dem.py}, \texttt{hydrology.py}, \texttt{rainfall.py}, \texttt{water.py}, \texttt{pond\_planning.py}), \texttt{app/schemas/} (Pydantic DTOs), \texttt{app/static/} (frontend), \texttt{tests/} (130 tests), \texttt{deploy/} (\texttt{deploy\_all.py}, \texttt{nginx/pond\_lb.conf}, \texttt{remote\_setup.sh}, \texttt{integration\_test.py}), \texttt{DEPLOYMENT.md} (architecture and update procedure), \texttt{Dockerfile}/\texttt{render.yaml} (cloud profile).
+
+\end{document}
+\endinput

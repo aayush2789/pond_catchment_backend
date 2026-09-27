@@ -558,6 +558,17 @@ The unified `/analyzePondSite` workflow (automatic DEM path) adds the following 
 | `RAINFALL_CACHE_DIR` | `data/cache/rainfall` | Rainfall disk cache directory |
 | `MAX_UPLOAD_SIZE_MB` | `20` | KML/KMZ upload size limit |
 | `MAX_LAND_VERTICES` | `2000` | Maximum vertices per land polygon |
+| `REDIS_URL` | *(empty)* | Shared Redis L2 cache for the distributed deployment (e.g. `redis://<proxy-node>:6379/1`); empty = local caches only |
+| `NODE_ID` | *(hostname)* | Node identifier exposed in logs, `X-Served-By`, `/ready` and `/version` |
+| `APP_ENV` | `production` | Deployment environment label |
+| `GIT_COMMIT` | *(empty)* | Build metadata exposed via `/api/v1/version` |
+| `DEM_CACHE_TTL_S` | `2592000` | Shared-cache TTL for DEM entries |
+| `RAINFALL_CACHE_TTL_S` | `604800` | Shared-cache TTL for rainfall entries |
+| `LOG_LEVEL` | `INFO` | Logging verbosity |
+
+## Distributed Deployment
+
+The system runs horizontally scaled across four API servers behind an Nginx load balancer (`Client → Nginx :3309 → 4 × FastAPI :8000 → shared Redis → external DEM/rainfall providers`). See [DEPLOYMENT.md](DEPLOYMENT.md) for the topology, the L1/L2/L3 cache design, health/readiness/version endpoints, failure-handling behavior, and the one-command deployment/update procedure (`python deploy/deploy_all.py push | nginx | verify`).
 
 ---
 

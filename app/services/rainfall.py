@@ -11,6 +11,7 @@ from fastapi import HTTPException, status
 
 from app.core.config import settings
 from app.schemas.rainfall import RainfallResult
+from app.services.cache import CacheLayer
 
 _MEMORY_CACHE_MAX_ENTRIES = 16
 
@@ -45,8 +46,12 @@ class RainfallService:
       climatological (no recent-year variability), so it is used only when the
       primary provider is unavailable.
 
-    Identical requests are cached in memory and on disk; the cache key rounds the
-    coordinates to 2 decimals (~1.1 km), so nearby points reuse the same result.
+    Identical requests are cached at three levels: per-process memory (L1), the
+    SHARED Redis cache reachable by every API node (L2), and a per-node disk
+    cache (L3, fallback when Redis is unavailable). The cache key rounds the
+    coordinates to 2 decimals (~1.1 km) and is namespaced with the application
+    version, so nearby points reuse the same result across all servers while
+    stale results never survive a code change.
     """
 
     _memory_cache: "OrderedDict[str, RainfallResult]" = OrderedDict()
@@ -96,29 +101,30 @@ class RainfallService:
 
     @staticmethod
     def _http_get_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            with httpx.Client(
-                timeout=httpx.Timeout(10.0, read=float(settings.RAINFALL_REQUEST_TIMEOUT_S))
-            ) as client:
-                response = client.get(url, params=params)
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Rainfall request to {url} failed: {exc}",
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Rainfall provider returned invalid JSON: {exc}",
-            )
-        if not isinstance(data, dict):
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Rainfall provider returned an unexpected response structure.",
-            )
-        return data
+        last_exc = None
+        for attempt in range(3):
+            try:
+                # Use explicit connect and read timeouts
+                with httpx.Client(
+                    timeout=httpx.Timeout(connect=15.0, read=float(settings.RAINFALL_REQUEST_TIMEOUT_S), write=15.0, pool=15.0),
+                    transport=httpx.HTTPTransport(retries=2)
+                ) as client:
+                    response = client.get(url, params=params)
+                    response.raise_for_status()
+                    return response.json()
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                import time
+                time.sleep(1.0)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Rainfall provider returned invalid JSON: {exc}",
+                )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Rainfall request to {url} failed: {last_exc}",
+        )
 
     @classmethod
     def _from_open_meteo(
@@ -243,31 +249,58 @@ class RainfallService:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @classmethod
-    def _cache_get(cls, key: str) -> Optional[RainfallResult]:
-        cached = cls._memory_cache.get(key)
-        if cached is not None:
-            cls._memory_cache.move_to_end(key)
-            return cached.model_copy(update={"cache_hit": True})
-        path = Path(settings.RAINFALL_CACHE_DIR) / f"{key}.json"
-        if path.exists():
-            try:
-                result = RainfallResult.model_validate_json(path.read_text(encoding="utf-8"))
-                cls._memory_cache[key] = result
-                if len(cls._memory_cache) > _MEMORY_CACHE_MAX_ENTRIES:
-                    cls._memory_cache.popitem(last=False)
-                return result.model_copy(update={"cache_hit": True})
-            except Exception:
-                return None
-        return None
-
-    @classmethod
-    def _cache_put(cls, key: str, result: RainfallResult) -> None:
+    def _memory_put(cls, key: str, result: RainfallResult) -> None:
         cls._memory_cache[key] = result
         if len(cls._memory_cache) > _MEMORY_CACHE_MAX_ENTRIES:
             cls._memory_cache.popitem(last=False)
+
+    @classmethod
+    def _load_from_disk(cls, key: str) -> Optional[RainfallResult]:
+        path = Path(settings.RAINFALL_CACHE_DIR) / f"{key}.json"
+        if not path.exists():
+            return None
+        try:
+            return RainfallResult.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    @classmethod
+    def _store_on_disk(cls, key: str, result: RainfallResult) -> None:
         cache_dir = Path(settings.RAINFALL_CACHE_DIR)
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
             (cache_dir / f"{key}.json").write_text(result.model_dump_json(), encoding="utf-8")
         except OSError:
             pass  # disk caching is best-effort
+
+    @classmethod
+    def _cache_get(cls, key: str) -> Optional[RainfallResult]:
+        # L1: per-process memory.
+        cached = cls._memory_cache.get(key)
+        if cached is not None:
+            cls._memory_cache.move_to_end(key)
+            return cached.model_copy(update={"cache_hit": True})
+        # L2: shared Redis (all API nodes).
+        shared = CacheLayer.get_json("rainfall", key)
+        if shared is not None:
+            try:
+                result = RainfallResult.model_validate(shared)
+                cls._memory_put(key, result)
+                return result.model_copy(update={"cache_hit": True})
+            except Exception:
+                pass  # malformed entry: treat as a miss
+        # L3: per-node disk cache.
+        disk = cls._load_from_disk(key)
+        if disk is not None:
+            cls._memory_put(key, disk)
+            return disk.model_copy(update={"cache_hit": True})
+        return None
+
+    @classmethod
+    def _cache_put(cls, key: str, result: RainfallResult) -> None:
+        cls._memory_put(key, result)
+        # Shared L2: the payload carries source/attribution, so any node can serve it.
+        CacheLayer.set_json(
+            "rainfall", key, json.loads(result.model_dump_json()), settings.RAINFALL_CACHE_TTL_S
+        )
+        cls._store_on_disk(key, result)

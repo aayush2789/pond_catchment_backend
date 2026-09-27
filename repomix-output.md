@@ -34,6 +34,11 @@ The content is organized as follows:
 
 # Directory Structure
 ````
+.commandcode/
+  taste/
+    taste/
+      taste.md
+    taste.md
 app/
   api/
     v1/
@@ -41,6 +46,9 @@ app/
         __init__.py
         catchment.py
         health.py
+        land.py
+        pond_site.py
+        terrain.py
       __init__.py
       api.py
     __init__.py
@@ -53,12 +61,29 @@ app/
     __init__.py
     catchment.py
     health.py
+    land.py
+    pond_site.py
+    pond.py
+    rainfall.py
+    terrain.py
+    water.py
   services/
     __init__.py
     candidate_selection.py
+    contours.py
+    dem.py
     hydrology.py
+    land.py
     parser.py
+    pond_planning.py
+    pond.py
+    rainfall.py
     terrain.py
+    water.py
+  static/
+    app.js
+    index.html
+    style.css
   utils/
     __init__.py
     file_handler.py
@@ -72,7 +97,15 @@ tests/
   __init__.py
   conftest.py
   test_catchment.py
+  test_contours.py
+  test_dem.py
   test_health.py
+  test_land.py
+  test_limits_and_frontend.py
+  test_pond_site.py
+  test_pond_siting.py
+  test_rainfall.py
+  test_water.py
 .dockerignore
 .env.example
 .gitignore
@@ -80,6 +113,7 @@ tests/
 assign2.txt
 contours_1m.kml
 Dockerfile
+prompt.txt
 README.md
 render.yaml
 report.pdf
@@ -87,6 +121,18 @@ requirements.txt
 ````
 
 # Files
+
+## File: .commandcode/taste/taste/taste.md
+````markdown
+# Taste
+- Execute multi-phase plans incrementally: implement one phase at a time, report what was done in that phase, and confirm before moving on. The user may explicitly authorize batch continuation (e.g. "continue with all phases") — when they do, proceed through all remaining phases without pausing for confirmation, but still report what was done in each phase, re-run the full test suite after each, add tests for the new work, and manually verify the API live. Confidence: 0.95
+- Inspect the complete repository first and provide a short reuse/modify assessment before changing anything; preserve working components, reuse existing services, and maintain backwards compatibility — never rewrite working code without a concrete reason. Confidence: 0.95
+- Small bug reports get direct, low-ceremony handling: the user bundles several issues in one casual message and asks to "look into it real quick" — diagnose the root cause in the actual code, fix immediately, verify, and give a concise root-cause explanation. No phased plan or confirmation gates for small fixes. Confidence: 0.6
+- The pond-catchment project is a university course assignment (CSD Assignment 1): deliverables must follow provided templates/rubrics (e.g., an acmart LaTeX technical report with mandatory sections like methodology, CSD themes, AI-usage declaration) — consult the given template/rubric before generating content. Confidence: 0.85
+- Deliverables must be grounded in what the code actually does: when asked whether the current implementation can fill a report/deliverable, give a section-by-section coverage assessment mapping each requirement to real modules, endpoints, and measured numbers, and honestly flag what cannot be truthfully claimed (missing features → gaps/future work, never fabricate); wait for a go-ahead before producing the full artifact. Confidence: 0.7
+- Preserve the existing architecture/stack unless there is a clear technical reason; avoid over-engineering — choose the simplest design that meets the requirement. Confidence: 0.9
+- Windows dev environment: use the `powershell` tool for running commands (`shell_command` fails there); Python is invoked from the project venv (`./venv/Scripts/python.exe`). Confidence: 0.8
+````
 
 ## File: app/api/v1/endpoints/__init__.py
 ````python
@@ -111,19 +157,101 @@ def get_health() -> HealthResponse:
     )
 ````
 
+## File: app/api/v1/endpoints/land.py
+````python
+from fastapi import APIRouter
+
+from app.schemas.land import LandSelectionRequest, LandSelectionResponse
+from app.services.land import LandSelectionService
+
+router = APIRouter()
+
+
+@router.post(
+    "/analyzeLand",
+    response_model=LandSelectionResponse,
+    summary="Validate and measure a user-selected land area (GeoJSON)",
+    description=(
+        "Accepts a user-selected land area as GeoJSON (Polygon or MultiPolygon), validates the "
+        "geometry (closed rings, non-zero area, reasonable coordinate ranges and extent), and "
+        "returns the selected area in m² and hectares, the geographic bounding box, and the "
+        "centroid. The selected polygon becomes the spatial constraint for all subsequent "
+        "terrain, hydrology, and pond-siting analysis."
+    ),
+)
+async def analyze_land(request: LandSelectionRequest) -> LandSelectionResponse:
+    selected_land = LandSelectionService.validate_and_measure(request.geometry)
+    return LandSelectionResponse(
+        status="success",
+        selected_land=selected_land,
+        message=(
+            "Selected land area successfully validated and measured. "
+            "This polygon constrains all subsequent terrain and hydrology analysis."
+        ),
+    )
+````
+
+## File: app/api/v1/endpoints/pond_site.py
+````python
+from typing import Optional
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from pydantic import ValidationError
+
+from app.schemas.pond_site import PondSiteAnalysisRequest, PondSiteAnalysisResponse
+from app.services.pond_planning import PondPlanningService
+
+router = APIRouter()
+
+
+@router.post(
+    "/analyzePondSite",
+    response_model=PondSiteAnalysisResponse,
+    summary="Unified pond-site analysis (land -> DEM -> terrain -> pond -> catchment -> rainfall -> water)",
+    description=(
+        "Complete end-to-end workflow. Normal usage: send `request` (form field) containing the "
+        "selected land GeoJSON and optional analysis parameters; terrain is acquired automatically "
+        "from the public DEM service. Expert/testing usage: upload a KML/KMZ contour `file` instead "
+        "of the geometry. Returns the selected land metrics, terrain/contour information, the "
+        "primary pond candidate (constrained to the selected land), the upstream catchment (which "
+        "may extend beyond the selected land), historical rainfall, theoretical runoff, expected "
+        "collectible water, and indicative pond storage."
+    ),
+)
+async def analyze_pond_site(
+    request: Optional[str] = Form(
+        None,
+        description="JSON-encoded PondSiteAnalysisRequest: {\"geometry\": {...}, \"analysis_parameters\": {...}}",
+    ),
+    file: Optional[UploadFile] = File(
+        None, description="Optional KML/KMZ contour map (expert/testing terrain source)."
+    ),
+) -> PondSiteAnalysisResponse:
+    if request is not None:
+        try:
+            payload = PondSiteAnalysisRequest.model_validate_json(request)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid analysis request JSON: {exc}",
+            )
+    else:
+        payload = PondSiteAnalysisRequest()
+
+    kml_bytes = None
+    kml_filename = None
+    if file is not None:
+        kml_bytes = await file.read()
+        kml_filename = file.filename or "upload.kml"
+
+    return PondPlanningService.analyze_pond_site(
+        payload, kml_bytes=kml_bytes, kml_filename=kml_filename
+    )
+````
+
 ## File: app/api/v1/__init__.py
 ````python
 """API v1 package."""
-````
-
-## File: app/api/v1/api.py
-````python
-from fastapi import APIRouter
-from app.api.v1.endpoints import catchment, health
-
-api_router = APIRouter()
-api_router.include_router(health.router, tags=["Health"])
-api_router.include_router(catchment.router, tags=["Catchment Analysis"])
 ````
 
 ## File: app/api/__init__.py
@@ -134,30 +262,6 @@ api_router.include_router(catchment.router, tags=["Catchment Analysis"])
 ## File: app/core/__init__.py
 ````python
 """Core application configuration and settings."""
-````
-
-## File: app/core/config.py
-````python
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-class Settings(BaseSettings):
-    PROJECT_NAME: str = "Village Pond Planning System"
-    API_V1_STR: str = "/api/v1"
-    VERSION: str = "0.1.0"
-    DEBUG: bool = False
-    HOST: str = "0.0.0.0"
-    PORT: int = 8000
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=True,
-        extra="ignore",
-    )
-
-
-settings = Settings()
 ````
 
 ## File: app/models/__init__.py
@@ -174,6 +278,1593 @@ class HealthResponse(BaseModel):
     status: str
     project_name: str
     version: str
+````
+
+## File: app/schemas/land.py
+````python
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+
+from pydantic import BaseModel, Field
+
+from app.schemas.catchment import GeographicExtent
+
+# A GeoJSON position is [longitude, latitude] or [longitude, latitude, elevation].
+Position = Annotated[List[float], Field(min_length=2, max_length=3)]
+
+
+class PolygonGeometry(BaseModel):
+    type: Literal["Polygon"]
+    coordinates: List[List[Position]]
+
+
+class MultiPolygonGeometry(BaseModel):
+    type: Literal["MultiPolygon"]
+    coordinates: List[List[List[Position]]]
+
+
+# Discriminated union: requests carrying any other GeoJSON type are rejected at validation time.
+LandGeometry = Annotated[Union[PolygonGeometry, MultiPolygonGeometry], Field(discriminator="type")]
+
+
+class LandSelectionRequest(BaseModel):
+    geometry: LandGeometry
+    properties: Optional[Dict[str, Any]] = None
+
+
+class Centroid(BaseModel):
+    latitude: float
+    longitude: float
+
+
+class SelectedLand(BaseModel):
+    geometry: Dict[str, Any]
+    geometry_type: str
+    area_m2: float
+    area_hectares: float
+    bounding_box: GeographicExtent
+    centroid: Centroid
+
+
+class LandSelectionResponse(BaseModel):
+    status: str = "success"
+    selected_land: SelectedLand
+    message: str
+````
+
+## File: app/schemas/pond_site.py
+````python
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, Field
+
+from app.schemas.catchment import CatchmentResult, PondCandidateSite, TerrainMetadata
+from app.schemas.land import LandGeometry, SelectedLand
+from app.schemas.pond import PondStorageResult
+from app.schemas.rainfall import RainfallResult
+from app.schemas.terrain import DEMSourceInfo
+from app.schemas.water import WaterVolumeResult
+
+
+class AnalysisParameters(BaseModel):
+    """Optional tuning of the unified analysis. All values fall back to
+    documented server defaults when omitted."""
+
+    buffer_meters: Optional[float] = Field(
+        default=None, ge=0.0, le=5000.0, description="Analysis-extent buffer around the land bbox."
+    )
+    dem_resolution_m: Optional[float] = Field(
+        default=None, ge=10.0, le=100.0, description="Target DEM grid resolution in meters."
+    )
+    contour_interval_m: Optional[float] = Field(
+        default=None, ge=1.0, le=100.0, description="Contour interval for generated contours."
+    )
+    runoff_coefficient: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Explicit runoff coefficient; defaults to the documented 0.30 planning value.",
+    )
+    collection_efficiency: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Explicit collection efficiency; defaults to the documented 0.75 planning value.",
+    )
+    snap_radius_meters: Optional[float] = Field(
+        default=None, ge=10.0, le=1000.0, description="Pour-point snapping radius."
+    )
+
+
+class PondSiteAnalysisRequest(BaseModel):
+    """Unified analysis request.
+
+    Normal workflow: `geometry` only — terrain is acquired automatically from the
+    DEM service. Expert/testing workflow: multipart upload of a KML/KMZ contour
+    file instead (`file` form field); `geometry` must then be omitted.
+    """
+
+    geometry: Optional[LandGeometry] = None
+    analysis_parameters: Optional[AnalysisParameters] = None
+
+
+class PondSiteAnalysisResponse(BaseModel):
+    status: str = "success"
+    selected_land: Optional[SelectedLand] = None
+    terrain: Optional[TerrainMetadata] = None
+    contours: Optional[Dict[str, Any]] = None
+    pond: Optional[PondCandidateSite] = None
+    catchment: Optional[CatchmentResult] = None
+    rainfall: Optional[RainfallResult] = None
+    water: Optional[WaterVolumeResult] = None
+    pond_storage: Optional[PondStorageResult] = None
+    dem_source: Optional[DEMSourceInfo] = None
+    message: str
+````
+
+## File: app/schemas/pond.py
+````python
+from typing import List
+
+from pydantic import BaseModel, Field
+
+
+class PondStorageResult(BaseModel):
+    """Indicative pond storage sizing (Phase 7).
+
+    Clearly distinct from runoff: `design_inflow_m3` is the expected collectible
+    water (inflow), while `storage_capacity_m3` is the conceptual basin volume
+    sized to hold that inflow. This is NOT an engineering design.
+    """
+
+    design_inflow_m3: float
+    storage_capacity_m3: float
+    depth_m: float
+    bottom_width_m: float
+    bottom_length_m: float
+    top_width_m: float
+    top_length_m: float
+    surface_area_m2: float
+    side_slope_hv: float
+    length_to_width_ratio: float
+    assumptions: List[str] = Field(default_factory=list)
+    note: str = (
+        "Indicative conceptual sizing derived from a truncated-pyramid basin geometry; "
+        "not a substitute for a certified engineering design."
+    )
+````
+
+## File: app/schemas/rainfall.py
+````python
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
+
+class RainfallResult(BaseModel):
+    """Historical rainfall statistics for a location (Phase 5)."""
+
+    rainfall_mm: float = Field(description="Mean annual rainfall depth over the period.")
+    units: str = "mm/year"
+    period: str = Field(description="Human-readable data period, e.g. '2015-2024'.")
+    start_year: int
+    end_year: int
+    monthly_mm: Optional[List[Optional[float]]] = Field(
+        default=None,
+        description="Mean monthly rainfall totals (mm) for JAN..DEC, where available.",
+    )
+    source: str = Field(description="Provider identifier, e.g. 'open-meteo'.")
+    dataset: str = Field(description="Underlying dataset description.")
+    attribution: str
+    cache_hit: bool = False
+    fetched_at: str = Field(description="ISO-8601 UTC timestamp of the provider fetch.")
+````
+
+## File: app/schemas/water.py
+````python
+from typing import List
+
+from pydantic import BaseModel, Field
+
+
+class WaterVolumeResult(BaseModel):
+    """Transparent runoff / collectible-water estimation (Phase 6)."""
+
+    catchment_area_m2: float
+    rainfall_mm: float
+    rainfall_period: str
+    runoff_coefficient: float = Field(ge=0.0, le=1.0)
+    runoff_coefficient_basis: str
+    theoretical_runoff_m3: float
+    collection_efficiency: float = Field(ge=0.0, le=1.0)
+    efficiency_basis: str
+    expected_collectible_water_m3: float
+    assumptions: List[str] = Field(default_factory=list)
+````
+
+## File: app/services/contours.py
+````python
+"""Contour line generation from a DEM grid.
+
+Implements vectorized marching squares over the elevation grid, chains the resulting
+segments into LineStrings, and converts them to WGS84 GeoJSON suitable for direct
+rendering on a frontend map (Leaflet/MapLibre).
+
+Documented assumption: the contour interval must reflect what the underlying DEM can
+support. A 30 m DEM resolves elevation trends of a few meters at best, so the default
+interval is conservative (5 m) and configurable; sub-meter intervals are not offered
+because they would imply precision the source data does not have.
+"""
+
+import math
+from collections import defaultdict, deque
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+from pyproj import Transformer
+from fastapi import HTTPException, status
+
+from app.services.terrain import TerrainModel
+
+MAX_CONTOUR_LEVELS = 50
+DEFAULT_CONTOUR_INTERVAL_M = 5.0
+MIN_CONTOUR_INTERVAL_M = 1.0
+
+# Marching squares case table.
+# Corner bits: TL=8 (row r, col c), TR=4 (r, c+1), BR=2 (r+1, c+1), BL=1 (r+1, c).
+# Edge ids: T=0, R=1, B=2, L=3. Each case lists the contour segments crossing that cell.
+_CASE_SEGMENTS: Dict[int, List[Tuple[int, int]]] = {
+    1: [(2, 3)],
+    2: [(1, 2)],
+    3: [(1, 3)],
+    4: [(0, 1)],
+    5: [(0, 3), (1, 2)],  # saddle
+    6: [(0, 2)],
+    7: [(0, 3)],
+    8: [(0, 3)],
+    9: [(0, 2)],
+    10: [(0, 1), (2, 3)],  # saddle
+    11: [(0, 1)],
+    12: [(1, 3)],
+    13: [(1, 2)],
+    14: [(2, 3)],
+}
+
+_EDGE_T, _EDGE_R, _EDGE_B, _EDGE_L = 0, 1, 2, 3
+
+
+class ContourGenerationService:
+    @staticmethod
+    def contour_levels(
+        min_elevation: float,
+        max_elevation: float,
+        interval: float,
+        max_levels: int = MAX_CONTOUR_LEVELS,
+    ) -> List[float]:
+        """Deterministic contour levels aligned to whole multiples of the interval."""
+        if interval < MIN_CONTOUR_INTERVAL_M:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Contour interval must be at least {MIN_CONTOUR_INTERVAL_M} m: "
+                    "the underlying DEM cannot support finer intervals."
+                ),
+            )
+        span = max_elevation - min_elevation
+        if span <= 0:
+            return []
+        effective = interval
+        if span / effective > max_levels:
+            effective = span / max_levels
+        start = math.ceil(min_elevation / effective) * effective
+        levels = np.arange(start, max_elevation + 1e-9, effective)
+        if len(levels) > max_levels:
+            levels = levels[:max_levels]
+        return [round(float(v), 4) for v in levels]
+
+    @staticmethod
+    def _segments_for_level(
+        grid: np.ndarray, level: float
+    ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+        """Extract unconstrained contour segments (in cell coordinates) for one level."""
+        above = grid >= level
+        tl = above[:-1, :-1]
+        tr = above[:-1, 1:]
+        br = above[1:, 1:]
+        bl = above[1:, :-1]
+        case = (
+            tl.astype(np.int16) * 8
+            + tr.astype(np.int16) * 4
+            + br.astype(np.int16) * 2
+            + bl.astype(np.int16)
+        )
+        crossing = (case != 0) & (case != 15)
+        rr, cc = np.nonzero(crossing)
+        if rr.size == 0:
+            return []
+
+        g = grid
+        tl_v = g[rr, cc].astype(np.float64)
+        tr_v = g[rr, cc + 1].astype(np.float64)
+        bl_v = g[rr + 1, cc].astype(np.float64)
+        br_v = g[rr + 1, cc + 1].astype(np.float64)
+
+        def frac(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+            denom = b - a
+            safe = np.where(denom == 0.0, 1.0, denom)
+            return np.clip((level - a) / safe, 0.0, 1.0)
+
+        f_top = frac(tl_v, tr_v)
+        f_right = frac(tr_v, br_v)
+        f_bottom = frac(bl_v, br_v)
+        f_left = frac(tl_v, bl_v)
+
+        rr_f = rr.astype(np.float64)
+        cc_f = cc.astype(np.float64)
+        edge_points = [
+            np.stack([cc_f + f_top, rr_f], axis=1),  # T
+            np.stack([cc_f + 1.0, rr_f + f_right], axis=1),  # R
+            np.stack([cc_f + f_bottom, rr_f + 1.0], axis=1),  # B
+            np.stack([cc_f, rr_f + f_left], axis=1),  # L
+        ]
+
+        segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        cases = case[rr, cc]
+        for i in range(rr.size):
+            for e1, e2 in _CASE_SEGMENTS[int(cases[i])]:
+                p1 = edge_points[e1][i]
+                p2 = edge_points[e2][i]
+                if (p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2 > 1e-12:
+                    segments.append(((float(p1[0]), float(p1[1])), (float(p2[0]), float(p2[1]))))
+        return segments
+
+    @staticmethod
+    def _chain_segments(
+        segments: List[Tuple[Tuple[float, float], Tuple[float, float]]]
+    ) -> List[List[Tuple[float, float]]]:
+        """Join marching-squares segments into polylines (closed rings stay closed)."""
+        def key(p: Tuple[float, float]) -> Tuple[float, float]:
+            return (round(p[0], 4), round(p[1], 4))
+
+        adjacency: Dict[Tuple[float, float], List[Tuple[int, bool]]] = defaultdict(list)
+        for idx, (a, b) in enumerate(segments):
+            adjacency[key(a)].append((idx, False))
+            adjacency[key(b)].append((idx, True))
+
+        used = [False] * len(segments)
+        lines: List[List[Tuple[float, float]]] = []
+        for start in range(len(segments)):
+            if used[start]:
+                continue
+            used[start] = True
+            a, b = segments[start]
+            pts: deque = deque([a, b])
+            for extend_right in (True, False):
+                while True:
+                    tip = pts[-1] if extend_right else pts[0]
+                    k = key(tip)
+                    match = next(((j, end_is_b) for j, end_is_b in adjacency.get(k, []) if not used[j]), None)
+                    if match is None:
+                        break
+                    j, end_is_b = match
+                    used[j] = True
+                    p, q = segments[j]
+                    nxt = p if end_is_b else q
+                    if extend_right:
+                        pts.append(nxt)
+                    else:
+                        pts.appendleft(nxt)
+            if len(pts) >= 2:
+                lines.append(list(pts))
+        return lines
+
+    @classmethod
+    def generate_contours(
+        cls,
+        terrain: TerrainModel,
+        interval: float = DEFAULT_CONTOUR_INTERVAL_M,
+    ) -> Dict[str, Any]:
+        """Generate contour lines as a GeoJSON FeatureCollection in WGS84 lon/lat."""
+        grid = np.asarray(terrain.elevation_grid, dtype=np.float64)
+        levels = cls.contour_levels(float(grid.min()), float(grid.max()), interval)
+        min_x, _, min_y, _ = terrain.bounds
+        res = terrain.grid_resolution_meters
+        to_wgs = Transformer.from_crs(terrain.crs, "EPSG:4326", always_xy=True)
+
+        features: List[Dict[str, Any]] = []
+        for level in levels:
+            segments = cls._segments_for_level(grid, level)
+            if not segments:
+                continue
+            for line in cls._chain_segments(segments):
+                cell_x = np.fromiter((p[0] for p in line), dtype=np.float64, count=len(line))
+                cell_y = np.fromiter((p[1] for p in line), dtype=np.float64, count=len(line))
+                xs = min_x + cell_x * res
+                ys = min_y + cell_y * res
+                lons, lats = to_wgs.transform(xs, ys)
+                coordinates = [
+                    [round(float(lon), 7), round(float(lat), 7)]
+                    for lon, lat in zip(lons, lats)
+                ]
+                features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": {"type": "LineString", "coordinates": coordinates},
+                        "properties": {"elevation_m": level},
+                    }
+                )
+
+        return {
+            "type": "FeatureCollection",
+            "features": features,
+            "properties": {
+                "interval_m": round(float(min(interval, (grid.max() - grid.min()) / max(1, len(levels))) if levels else interval), 3),
+                "contour_count": len(features),
+                "crs": "EPSG:4326",
+            },
+        }
+````
+
+## File: app/services/pond_planning.py
+````python
+"""Unified pond-planning workflow (Phase 8).
+
+Composes the existing single-responsibility services into the full pipeline:
+
+    selected land -> analysis extent -> DEM acquisition (or KML fallback)
+      -> terrain (DEM reconstruction, slope) -> contours
+      -> hydrology (conditioning, D8 flow, accumulation - computed once)
+      -> candidate pond siting (constrained to the selected land)
+      -> catchment delineation (may extend beyond the selected land)
+      -> rainfall -> runoff / expected collectible water -> indicative storage
+
+The KML/KMZ contour path is retained as an expert/testing fallback: when a file is
+supplied instead of a land geometry, terrain comes from contour reconstruction and
+no land-constraint masking is applied.
+"""
+
+from typing import Optional
+
+from fastapi import HTTPException, status
+from shapely.geometry import shape as shape_from_geojson
+
+from app.core.config import settings
+from app.schemas.pond_site import (
+    AnalysisParameters,
+    PondSiteAnalysisRequest,
+    PondSiteAnalysisResponse,
+)
+from app.schemas.terrain import DEMSourceInfo as DEMSourceInfoSchema
+from app.services.candidate_selection import CandidateSelectionService
+from app.services.contours import DEFAULT_CONTOUR_INTERVAL_M, ContourGenerationService
+from app.services.dem import DEMService
+from app.services.hydrology import HydrologyService
+from app.services.land import LandSelectionService
+from app.services.parser import ContourParserService
+from app.services.pond import PondStorageService
+from app.services.rainfall import RainfallService
+from app.services.terrain import TerrainService
+from app.services.water import WaterVolumeService
+
+DEFAULT_SNAP_RADIUS_M = 100.0
+
+
+class PondPlanningService:
+    @classmethod
+    def analyze_pond_site(
+        cls,
+        request: PondSiteAnalysisRequest,
+        kml_bytes: Optional[bytes] = None,
+        kml_filename: Optional[str] = None,
+    ) -> PondSiteAnalysisResponse:
+        params = request.analysis_parameters or AnalysisParameters()
+
+        if (kml_bytes is None) == (request.geometry is None):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Provide exactly one terrain source: a land `geometry` (automatic DEM "
+                    "acquisition) or an uploaded KML/KMZ contour `file`."
+                ),
+            )
+
+        # 1. Land selection + terrain acquisition ---------------------------------------
+        selected_land = None
+        dem_source = None
+        if kml_bytes is not None:
+            kml_payload, _entry, _ext = ContourParserService.extract_kml_payload(
+                kml_bytes, kml_filename or "upload.kml"
+            )
+            dataset = ContourParserService.parse_and_normalize_kml(kml_payload, kml_filename or "upload.kml")
+            terrain = TerrainService.reconstruct_terrain(dataset)
+            terrain_message = "Terrain reconstructed from the uploaded contour file."
+        else:
+            selected_land = LandSelectionService.validate_and_measure(request.geometry)
+            buffer_meters = (
+                params.buffer_meters
+                if params.buffer_meters is not None
+                else settings.ANALYSIS_BUFFER_METERS
+            )
+            analysis_extent = DEMService.compute_analysis_extent(
+                selected_land.bounding_box, buffer_meters
+            )
+            dem = DEMService.acquire_dem(
+                analysis_extent, target_resolution_m=params.dem_resolution_m
+            )
+            terrain = TerrainService.reconstruct_terrain_from_dem(dem)
+            dem_source = DEMSourceInfoSchema(
+                provider=dem.source.provider,
+                dataset=dem.source.dataset,
+                attribution=dem.source.attribution,
+                zoom_level=dem.source.zoom_level,
+            )
+            terrain_message = (
+                "Terrain acquired automatically for the buffered analysis extent "
+                "around the selected land."
+            )
+
+        # 2. Contours for visualization ---------------------------------------------------
+        contour_interval = (
+            params.contour_interval_m
+            if params.contour_interval_m is not None
+            else DEFAULT_CONTOUR_INTERVAL_M
+        )
+        contours = ContourGenerationService.generate_contours(terrain, contour_interval)
+
+        # 3. Hydrology grids computed once and shared ------------------------------------
+        filled_dem = HydrologyService.condition_dem(terrain.elevation_grid)
+        flow_dir = HydrologyService.calculate_flow_direction(
+            filled_dem, terrain.grid_resolution_meters
+        )
+        flow_acc = HydrologyService.calculate_flow_accumulation(flow_dir, filled_dem)
+
+        # 4. Candidate siting (land-constrained when a polygon is provided) ---------------
+        candidate_mask = None
+        if selected_land is not None:
+            land_polygon = shape_from_geojson(selected_land.geometry)
+            candidate_mask = TerrainService.mask_cells_within_polygon(terrain, land_polygon)
+
+        candidates = CandidateSelectionService.identify_candidates(
+            terrain,
+            config=CandidateSelectionService.FLOW_WEIGHTED_CONFIG,
+            flow_accumulation=flow_acc,
+            candidate_mask=candidate_mask,
+        )
+        if not candidates:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "No suitable pond location could be identified within the selected land. "
+                    "The selection may be too small relative to the DEM grid resolution "
+                    f"({terrain.grid_resolution_meters} m) or lie on unsuitable terrain."
+                ),
+            )
+        pond = candidates[0]
+
+        # 5. Catchment delineation (not clipped to the land) ------------------------------
+        catchment = HydrologyService.analyze_hydrology(
+            terrain,
+            pond,
+            snap_radius_meters=(
+                params.snap_radius_meters
+                if params.snap_radius_meters is not None
+                else DEFAULT_SNAP_RADIUS_M
+            ),
+            conditioned_dem=filled_dem,
+            flow_direction=flow_dir,
+            flow_accumulation=flow_acc,
+        )
+
+        # 6. Rainfall, runoff, indicative storage ------------------------------------------
+        rainfall = RainfallService.get_rainfall(pond.latitude, pond.longitude)
+        water = WaterVolumeService.estimate(
+            catchment_area_m2=catchment.catchment_area_sq_meters,
+            rainfall_mm=rainfall.rainfall_mm,
+            rainfall_period=rainfall.period,
+            runoff_coefficient=params.runoff_coefficient,
+            collection_efficiency=params.collection_efficiency,
+        )
+        pond_storage = PondStorageService.suggest_pond_storage(
+            water.expected_collectible_water_m3
+        )
+
+        return PondSiteAnalysisResponse(
+            status="success",
+            selected_land=selected_land,
+            terrain=terrain.to_metadata(),
+            contours=contours,
+            pond=pond,
+            catchment=catchment,
+            rainfall=rainfall,
+            water=water,
+            pond_storage=pond_storage,
+            dem_source=dem_source,
+            message=(
+                f"{terrain_message} Pond site, catchment, rainfall, and water-volume "
+                "estimation completed."
+            ),
+        )
+````
+
+## File: app/services/pond.py
+````python
+"""Indicative pond storage estimation (Phase 7).
+
+The immediate required output of the system is the expected collectible water
+volume (Phase 6). This module keeps pond *storage* a clearly separate concept and
+provides a light, documented sizing model so storage can be extended later:
+
+    Basin model: truncated rectangular pyramid (frustum).
+    Capacity  : V = depth * (A_bottom + A_top) / 2   (average end areas)
+    Top dims  : bottom dims + 2 * side_slope * depth (1:2 H:V side slopes default)
+
+The basin is sized so its capacity matches the expected collectible inflow
+(allowing the pond to fill within the analysis period). All outputs are
+planning-level indications, not engineering designs.
+"""
+
+from fastapi import HTTPException, status
+
+from app.schemas.pond import PondStorageResult
+
+DEFAULT_MAX_DEPTH_M = 3.0
+DEFAULT_SIDE_SLOPE_HV = 2.0  # horizontal : vertical, typical small earthen pond
+DEFAULT_LENGTH_TO_WIDTH_RATIO = 1.5
+_MAX_ITERATIONS = 60  # bisection iterations -> width resolution < 1e-6 m
+
+
+class PondStorageService:
+    @staticmethod
+    def _capacity_for_bottom_width(bottom_width: float, depth: float, side_slope: float, ratio: float) -> float:
+        bottom_length = bottom_width * ratio
+        top_width = bottom_width + 2.0 * side_slope * depth
+        top_length = bottom_length + 2.0 * side_slope * depth
+        area_bottom = bottom_width * bottom_length
+        area_top = top_width * top_length
+        return depth * (area_bottom + area_top) / 2.0
+
+    @classmethod
+    def suggest_pond_storage(
+        cls,
+        expected_collectible_water_m3: float,
+        max_depth_m: float = DEFAULT_MAX_DEPTH_M,
+        side_slope_hv: float = DEFAULT_SIDE_SLOPE_HV,
+        length_to_width_ratio: float = DEFAULT_LENGTH_TO_WIDTH_RATIO,
+    ) -> PondStorageResult:
+        if expected_collectible_water_m3 <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Expected collectible water must be positive to size a pond.",
+            )
+        if max_depth_m <= 0 or max_depth_m > 20:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Pond depth must be within (0, 20] meters.",
+            )
+        if side_slope_hv <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Side slope must be positive.",
+            )
+        if length_to_width_ratio < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Length-to-width ratio must be >= 1.",
+            )
+
+        target = expected_collectible_water_m3
+
+        def capacity(width: float) -> float:
+            return cls._capacity_for_bottom_width(width, max_depth_m, side_slope_hv, length_to_width_ratio)
+
+        # Bisect the bottom width until capacity matches the inflow volume.
+        lo, hi = 0.0, 1.0
+        while capacity(hi) < target:
+            hi *= 2.0
+            if hi > 1e6:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Expected inflow too large to size an indicative pond basin.",
+                )
+        for _ in range(_MAX_ITERATIONS):
+            mid = (lo + hi) / 2.0
+            if capacity(mid) < target:
+                lo = mid
+            else:
+                hi = mid
+
+        bottom_width = hi
+        bottom_length = bottom_width * length_to_width_ratio
+        top_width = bottom_width + 2.0 * side_slope_hv * max_depth_m
+        top_length = bottom_length + 2.0 * side_slope_hv * max_depth_m
+        capacity_m3 = capacity(bottom_width)
+
+        return PondStorageResult(
+            design_inflow_m3=round(target, 2),
+            storage_capacity_m3=round(capacity_m3, 2),
+            depth_m=round(max_depth_m, 2),
+            bottom_width_m=round(bottom_width, 2),
+            bottom_length_m=round(bottom_length, 2),
+            top_width_m=round(top_width, 2),
+            top_length_m=round(top_length, 2),
+            surface_area_m2=round(top_width * top_length, 2),
+            side_slope_hv=side_slope_hv,
+            length_to_width_ratio=length_to_width_ratio,
+            assumptions=[
+                "Basin approximated as a truncated rectangular pyramid.",
+                f"Capacity = depth x (bottom area + top area) / 2 with depth {max_depth_m} m "
+                f"and side slope {side_slope_hv}H:1V.",
+                "The basin is sized so capacity ~= expected collectible inflow.",
+                "No seepage lining, inlet/outlet structures, or freeboard are modeled.",
+            ],
+        )
+````
+
+## File: app/services/rainfall.py
+````python
+from typing import Any, Dict, List, Optional
+from collections import OrderedDict
+from datetime import datetime, timezone
+import hashlib
+import json
+from pathlib import Path
+
+import httpx
+import numpy as np
+from fastapi import HTTPException, status
+
+from app.core.config import settings
+from app.schemas.rainfall import RainfallResult
+
+_MEMORY_CACHE_MAX_ENTRIES = 16
+
+MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+MONTH_NAMES = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+NASA_POWER_CLIMATOLOGY_URL = "https://power.larc.nasa.gov/api/temporal/climatology/point"
+
+OPEN_METEO_ATTRIBUTION = (
+    "Rainfall from the Open-Meteo Historical Weather API (ERA5 / ERA5-Land reanalysis, "
+    "https://open-meteo.com). Spatial resolution ~9-11 km; suitable for planning-level estimates."
+)
+NASA_POWER_ATTRIBUTION = (
+    "Rainfall from the NASA POWER Agroclimatology API (https://power.larc.nasa.gov). "
+    "Spatial resolution ~0.5 degrees; suitable for planning-level estimates."
+)
+
+
+class RainfallService:
+    """Historical rainfall statistics for a location, from public APIs.
+
+    Provider evaluation (documented decision):
+
+    - Open-Meteo Historical Weather (archive) API — PRIMARY: free, no API key, daily
+      precipitation from the ERA5/ERA5-Land reanalysis (1940-present, ~9-11 km grid),
+      fast JSON responses and generous fair-use limits. Selected because it provides
+      actual daily series (enabling annual means and monthly climatology) without a key.
+
+    - NASA POWER Agroclimatology — FALLBACK: free, no API key, ~0.5 degree grid,
+      monthly climatology (mean daily precipitation per month). Coarser and
+      climatological (no recent-year variability), so it is used only when the
+      primary provider is unavailable.
+
+    Identical requests are cached in memory and on disk; the cache key rounds the
+    coordinates to 2 decimals (~1.1 km), so nearby points reuse the same result.
+    """
+
+    _memory_cache: "OrderedDict[str, RainfallResult]" = OrderedDict()
+
+    # -- public API ---------------------------------------------------------------------
+
+    @classmethod
+    def get_rainfall(cls, latitude: float, longitude: float) -> RainfallResult:
+        if not (-90.0 <= latitude <= 90.0) or not (-180.0 <= longitude <= 180.0):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Rainfall request coordinates are out of range.",
+            )
+        end_year = datetime.now(timezone.utc).year - 1  # last complete year
+        start_year = end_year - settings.RAINFALL_YEARS_WINDOW + 1
+
+        key = cls._cache_key(latitude, longitude, start_year, end_year)
+        cached = cls._cache_get(key)
+        if cached is not None:
+            return cached
+
+        errors: List[str] = []
+        try:
+            result = cls._from_open_meteo(latitude, longitude, start_year, end_year)
+        except HTTPException as exc:
+            errors.append(f"open-meteo: {exc.detail}")
+            result = None
+        if result is None:
+            try:
+                result = cls._from_nasa_power(latitude, longitude, start_year, end_year)
+            except HTTPException as exc:
+                errors.append(f"nasa-power: {exc.detail}")
+                result = None
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=(
+                    "All rainfall providers failed. "
+                    + " | ".join(errors)
+                ),
+            )
+
+        cls._cache_put(key, result)
+        return result
+
+    # -- providers ----------------------------------------------------------------------
+
+    @staticmethod
+    def _http_get_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(10.0, read=float(settings.RAINFALL_REQUEST_TIMEOUT_S))
+            ) as client:
+                response = client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Rainfall request to {url} failed: {exc}",
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Rainfall provider returned invalid JSON: {exc}",
+            )
+        if not isinstance(data, dict):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Rainfall provider returned an unexpected response structure.",
+            )
+        return data
+
+    @classmethod
+    def _from_open_meteo(
+        cls, latitude: float, longitude: float, start_year: int, end_year: int
+    ) -> RainfallResult:
+        data = cls._http_get_json(
+            OPEN_METEO_ARCHIVE_URL,
+            {
+                "latitude": latitude,
+                "longitude": longitude,
+                "start_date": f"{start_year}-01-01",
+                "end_date": f"{end_year}-12-31",
+                "daily": "precipitation_sum",
+                "timezone": "UTC",
+            },
+        )
+        daily = data.get("daily") or {}
+        times = daily.get("time") or []
+        precip = daily.get("precipitation_sum") or []
+        if not times or len(times) != len(precip):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Open-Meteo response does not contain a usable daily precipitation series.",
+            )
+
+        annual_totals: Dict[int, float] = {y: 0.0 for y in range(start_year, end_year + 1)}
+        monthly_sums = [[0.0, 0] for _ in range(12)]  # [total, valid-day count] per month
+        for date_str, value in zip(times, precip):
+            if value is None:
+                continue
+            year = int(str(date_str)[0:4])
+            month = int(str(date_str)[5:7])
+            if year in annual_totals:
+                annual_totals[year] += float(value)
+            monthly_sums[month - 1][0] += float(value)
+            monthly_sums[month - 1][1] += 1
+
+        valid_years = {y: total for y, total in annual_totals.items() if total > 0.0}
+        if not valid_years:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Open-Meteo returned insufficient precipitation data for the requested period.",
+            )
+        annual_mean = float(np.mean(list(valid_years.values())))
+
+        # Monthly climatology: mean monthly total across the years with data.
+        years_with_data = max(1, len(valid_years))
+        monthly_mm = [
+            round(total / years_with_data, 1) if count > 0 else None
+            for total, count in monthly_sums
+        ]
+
+        return RainfallResult(
+            rainfall_mm=round(annual_mean, 1),
+            units="mm/year",
+            period=f"{start_year}-{end_year}",
+            start_year=start_year,
+            end_year=end_year,
+            monthly_mm=monthly_mm,
+            source="open-meteo",
+            dataset="ERA5 / ERA5-Land reanalysis (historical daily precipitation)",
+            attribution=OPEN_METEO_ATTRIBUTION,
+            cache_hit=False,
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    @classmethod
+    def _from_nasa_power(
+        cls, latitude: float, longitude: float, start_year: int, end_year: int
+    ) -> RainfallResult:
+        data = cls._http_get_json(
+            NASA_POWER_CLIMATOLOGY_URL,
+            {
+                "latitude": latitude,
+                "longitude": longitude,
+                "parameters": "PRECTOTCORR",
+                "community": "AG",
+                "format": "JSON",
+            },
+        )
+        try:
+            values = data["properties"]["parameter"]["PRECTOTCORR"]
+            annual_daily_mean = float(values["ANN"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"NASA POWER response missing PRECTOTCORR data: {exc}",
+            )
+        if annual_daily_mean < 0:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="NASA POWER returned NoData for the requested location.",
+            )
+
+        annual_mean = annual_daily_mean * 365.25
+        monthly_mm = []
+        for idx, name in enumerate(MONTH_NAMES):
+            daily = values.get(name)
+            monthly_mm.append(
+                round(float(daily) * MONTH_DAYS[idx], 1) if daily is not None and float(daily) >= 0 else None
+            )
+
+        return RainfallResult(
+            rainfall_mm=round(annual_mean, 1),
+            units="mm/year",
+            period=f"climatology ({start_year}-{end_year} reference window)",
+            start_year=start_year,
+            end_year=end_year,
+            monthly_mm=monthly_mm,
+            source="nasa-power",
+            dataset="POWER PRECTOTCORR agroclimatology (monthly mean daily precipitation)",
+            attribution=NASA_POWER_ATTRIBUTION,
+            cache_hit=False,
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    # -- cache --------------------------------------------------------------------------
+
+    @staticmethod
+    def _cache_key(latitude: float, longitude: float, start_year: int, end_year: int) -> str:
+        raw = f"{round(latitude, 2):.2f}|{round(longitude, 2):.2f}|{start_year}|{end_year}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _cache_get(cls, key: str) -> Optional[RainfallResult]:
+        cached = cls._memory_cache.get(key)
+        if cached is not None:
+            cls._memory_cache.move_to_end(key)
+            return cached.model_copy(update={"cache_hit": True})
+        path = Path(settings.RAINFALL_CACHE_DIR) / f"{key}.json"
+        if path.exists():
+            try:
+                result = RainfallResult.model_validate_json(path.read_text(encoding="utf-8"))
+                cls._memory_cache[key] = result
+                if len(cls._memory_cache) > _MEMORY_CACHE_MAX_ENTRIES:
+                    cls._memory_cache.popitem(last=False)
+                return result.model_copy(update={"cache_hit": True})
+            except Exception:
+                return None
+        return None
+
+    @classmethod
+    def _cache_put(cls, key: str, result: RainfallResult) -> None:
+        cls._memory_cache[key] = result
+        if len(cls._memory_cache) > _MEMORY_CACHE_MAX_ENTRIES:
+            cls._memory_cache.popitem(last=False)
+        cache_dir = Path(settings.RAINFALL_CACHE_DIR)
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / f"{key}.json").write_text(result.model_dump_json(), encoding="utf-8")
+        except OSError:
+            pass  # disk caching is best-effort
+````
+
+## File: app/services/water.py
+````python
+"""Transparent water-volume estimation (Phase 6).
+
+Methodology (documented, standard water-balance approach):
+
+    theoretical runoff (m³) = catchment area (m²) × rainfall depth (m) × runoff coefficient
+    expected collectible water (m³) = theoretical runoff × collection efficiency
+
+- The runoff coefficient (0 < C < 1) expresses the fraction of rainfall on the
+  catchment that becomes surface runoff. For small rural/mixed agricultural
+  catchments, published guidance (e.g. USDA SCS, FAO) places typical values in
+  the 0.2-0.5 range depending on slope, soil and land cover. The default used
+  here (0.30) sits at the middle of that range and must be treated as a
+  planning-level assumption, not a measured value. Callers may pass an explicit
+  coefficient to override it, and the basis is always reported.
+
+- The collection efficiency accounts for conveyance, seepage and evaporation
+  losses between runoff generation and actual storage in the pond. A planning
+  default of 0.75 is used and reported explicitly.
+
+- Unit chain: area m² × rainfall (mm / 1000 = m) = m³, so volumes are cubic
+  metres by construction.
+"""
+
+from typing import Optional
+
+from fastapi import HTTPException, status
+
+from app.schemas.water import WaterVolumeResult
+
+# Documented planning defaults (see module docstring for their origin).
+DEFAULT_RUNOFF_COEFFICIENT = 0.30
+RUNOFF_COEFFICIENT_BASIS = (
+    "Default 0.30 for a small rural/mixed-agricultural catchment "
+    "(typical literature range 0.2-0.5, USDA SCS / FAO guidance)."
+)
+DEFAULT_COLLECTION_EFFICIENCY = 0.75
+EFFICIENCY_BASIS = (
+    "Planning assumption of 75%: allowance for conveyance, seepage and "
+    "evaporation losses between runoff generation and pond storage."
+)
+
+
+class WaterVolumeService:
+    @staticmethod
+    def estimate(
+        catchment_area_m2: float,
+        rainfall_mm: float,
+        rainfall_period: str,
+        runoff_coefficient: Optional[float] = None,
+        collection_efficiency: Optional[float] = None,
+    ) -> WaterVolumeResult:
+        if catchment_area_m2 <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Catchment area must be positive for runoff estimation.",
+            )
+        if rainfall_mm < 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Rainfall depth cannot be negative.",
+            )
+
+        coefficient = (
+            runoff_coefficient if runoff_coefficient is not None else DEFAULT_RUNOFF_COEFFICIENT
+        )
+        efficiency = (
+            collection_efficiency
+            if collection_efficiency is not None
+            else DEFAULT_COLLECTION_EFFICIENCY
+        )
+        if not (0.0 <= coefficient <= 1.0):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Runoff coefficient must be within [0, 1].",
+            )
+        if not (0.0 <= efficiency <= 1.0):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Collection efficiency must be within [0, 1].",
+            )
+
+        rainfall_m = rainfall_mm / 1000.0
+        theoretical = catchment_area_m2 * rainfall_m * coefficient
+        collectible = theoretical * efficiency
+
+        basis = RUNOFF_COEFFICIENT_BASIS
+        if runoff_coefficient is not None:
+            basis = "Explicitly provided in the analysis parameters."
+
+        return WaterVolumeResult(
+            catchment_area_m2=round(catchment_area_m2, 2),
+            rainfall_mm=round(rainfall_mm, 1),
+            rainfall_period=rainfall_period,
+            runoff_coefficient=round(coefficient, 3),
+            runoff_coefficient_basis=basis,
+            theoretical_runoff_m3=round(theoretical, 2),
+            collection_efficiency=round(efficiency, 3),
+            efficiency_basis=EFFICIENCY_BASIS,
+            expected_collectible_water_m3=round(collectible, 2),
+            assumptions=[
+                "Runoff volume = catchment area x rainfall depth x runoff coefficient "
+                "(rainfall converted from mm to m).",
+                "Expected collectible water = theoretical runoff x collection efficiency.",
+                "The runoff coefficient and collection efficiency are planning-level "
+                "assumptions, not measured values; both are reported explicitly.",
+            ],
+        )
+````
+
+## File: app/static/app.js
+````javascript
+/* Village Pond Planning System - frontend.
+   The frontend performs NO terrain/hydrology/rainfall/runoff calculations:
+   it sends the selected GeoJSON to the backend and renders the response. */
+
+"use strict";
+
+const map = L.map("map").setView([21.2475, 81.293], 14);
+
+const osm = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+});
+const satellite = L.tileLayer(
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  { maxZoom: 19, attribution: "Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics" }
+);
+osm.addTo(map);
+L.control.layers({ "OpenStreetMap": osm, "Satellite (Esri)": satellite }).addTo(map);
+
+/* --- state ---------------------------------------------------------------- */
+
+let drawMode = false;
+let vertices = [];
+let draftLine = null;
+let landPolygon = null;
+let landGeometry = null;
+let catchmentLayer = null;
+let pondMarker = null;
+let contoursLayer = null;
+
+/* --- element refs --------------------------------------------------------- */
+
+const el = (id) => document.getElementById(id);
+const startBtn = el("startDraw");
+const finishBtn = el("finishDraw");
+const clearBtn = el("clearAll");
+const analyzeBtn = el("analyzeBtn");
+const statusBox = el("status");
+const statusText = el("statusText");
+const errorBox = el("error");
+const resultsCard = el("results");
+const showContours = el("showContours");
+
+/* --- polygon drawing (click or double-click = one vertex; Finish button closes) --- */
+
+function redrawDraft() {
+  if (draftLine) map.removeLayer(draftLine);
+  if (vertices.length >= 1) {
+    draftLine = L.polyline(vertices, { color: "#2563eb", dashArray: "4 4" }).addTo(map);
+  }
+}
+
+function startDrawing() {
+  clearAll();
+  drawMode = true;
+  vertices = [];
+  map.doubleClickZoom.disable();
+  startBtn.disabled = true;
+  finishBtn.disabled = false;
+  el("drawHint").textContent = "Click (or double-click) to add vertices; press Finish to close. Minimum 3 vertices.";
+}
+
+function finishDrawing() {
+  // Drop consecutive duplicate vertices (e.g. from rapid clicking) before validation.
+  vertices = vertices.filter(
+    (v, i) => i === 0 || v[0] !== vertices[i - 1][0] || v[1] !== vertices[i - 1][1]
+  );
+  if (!drawMode || vertices.length < 3) {
+    showError(
+      `A polygon needs at least 3 distinct vertices (currently ${vertices.length}). Keep clicking on the map to add them, then press Finish.`
+    );
+    return;
+  }
+  drawMode = false;
+  map.doubleClickZoom.enable();
+  if (draftLine) { map.removeLayer(draftLine); draftLine = null; }
+
+  const ring = vertices.map((v) => [v[1], v[0]]); // GeoJSON [lon, lat]
+  ring.push([ring[0][0], ring[0][1]]); // close the ring (GeoJSON requirement)
+
+  landGeometry = { type: "Polygon", coordinates: [ring] };
+  landPolygon = L.polygon(vertices, { color: "#2563eb", weight: 2, fillOpacity: 0.15 }).addTo(map);
+
+  startBtn.disabled = false;
+  finishBtn.disabled = true;
+  clearBtn.disabled = false;
+  analyzeBtn.disabled = false;
+  el("drawHint").textContent = "Land polygon selected. Ready to analyze.";
+}
+
+function clearAll() {
+  drawMode = false;
+  map.doubleClickZoom.enable();
+  vertices = [];
+  if (draftLine) { map.removeLayer(draftLine); draftLine = null; }
+  if (landPolygon) { map.removeLayer(landPolygon); landPolygon = null; }
+  if (catchmentLayer) { map.removeLayer(catchmentLayer); catchmentLayer = null; }
+  if (pondMarker) { map.removeLayer(pondMarker); pondMarker = null; }
+  if (contoursLayer) { map.removeLayer(contoursLayer); contoursLayer = null; }
+  landGeometry = null;
+  startBtn.disabled = false;
+  finishBtn.disabled = true;
+  clearBtn.disabled = true;
+  analyzeBtn.disabled = true;
+  resultsCard.hidden = true;
+  errorBox.hidden = true;
+  statusBox.hidden = true;
+  el("drawHint").textContent = "Click (or double-click) to add vertices, then press Finish to close the polygon. Minimum 3 vertices.";
+}
+
+let lastVertexTime = 0;
+
+map.on("click", (e) => {
+  if (!drawMode) return;
+  // A double-click fires click -> click -> dblclick. Debounce the second click so
+  // a double-click marks exactly ONE vertex; the polygon is closed only via Finish.
+  const now = Date.now();
+  if (now - lastVertexTime < 300) return;
+  lastVertexTime = now;
+  vertices.push([e.latlng.lat, e.latlng.lng]);
+  redrawDraft();
+});
+startBtn.addEventListener("click", startDrawing);
+finishBtn.addEventListener("click", finishDrawing);
+clearBtn.addEventListener("click", clearAll);
+showContours.addEventListener("change", () => {
+  if (!contoursLayer) return;
+  if (showContours.checked) map.addLayer(contoursLayer);
+  else map.removeLayer(contoursLayer);
+});
+
+/* --- analysis request ------------------------------------------------------ */
+
+function fmt(n, digits = 2) {
+  return Number(n).toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+
+async function runAnalysis() {
+  if (!landGeometry) return;
+  errorBox.hidden = true;
+  statusBox.hidden = false;
+  statusText.textContent = "Analyzing terrain, siting the pond, delineating the catchment, fetching rainfall…";
+  analyzeBtn.disabled = true;
+
+  try {
+    const body = new FormData();
+    body.append("request", JSON.stringify({ geometry: landGeometry }));
+
+    const response = await fetch("/api/v1/analyzePondSite", { method: "POST", body });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data);
+      showError(`Analysis failed (HTTP ${response.status}):\n${detail}`);
+      return;
+    }
+    renderResults(data);
+  } catch (err) {
+    showError(`Could not reach the backend: ${err.message}`);
+  } finally {
+    statusBox.hidden = true;
+    analyzeBtn.disabled = false;
+  }
+}
+analyzeBtn.addEventListener("click", runAnalysis);
+
+/* --- rendering ------------------------------------------------------------- */
+
+function renderResults(data) {
+  if (catchmentLayer) map.removeLayer(catchmentLayer);
+  if (pondMarker) map.removeLayer(pondMarker);
+  if (contoursLayer) map.removeLayer(contoursLayer);
+
+  // Catchment overlay (upstream contributing area; may extend beyond the land).
+  if (data.catchment && data.catchment.boundary) {
+    catchmentLayer = L.geoJSON(data.catchment.boundary, {
+      style: { color: "#16a34a", weight: 2, dashArray: "6 4", fillOpacity: 0.1 },
+    }).addTo(map);
+  }
+
+  // Pond marker.
+  if (data.pond) {
+    pondMarker = L.circleMarker([data.pond.latitude, data.pond.longitude], {
+      radius: 9,
+      color: "#dc2626",
+      fillColor: "#dc2626",
+      fillOpacity: 0.9,
+    })
+      .bindTooltip(`Suggested pond site`, { permanent: false })
+      .addTo(map);
+  }
+
+  // Contours.
+  let contourCount = 0;
+  if (data.contours && Array.isArray(data.contours.features)) {
+    contoursLayer = L.layerGroup(
+      data.contours.features.map((f) =>
+        L.polyline(
+          f.geometry.coordinates.map((c) => [c[1], c[0]]),
+          { color: "#6b7280", weight: 1, opacity: 0.55 }
+        ).bindTooltip(`${f.properties.elevation_m} m`, { sticky: true })
+      )
+    );
+    contourCount = data.contours.features.length;
+    if (showContours.checked) contoursLayer.addTo(map);
+  }
+
+  // Fit to the catchment if available (visualizes land ⊂ catchment), else the land.
+  const fitLayer = catchmentLayer || landPolygon;
+  if (fitLayer) map.fitBounds(fitLayer.getBounds().pad(0.15));
+
+  const land = data.selected_land;
+  el("resLand").textContent = land
+    ? `${fmt(land.area_m2, 0)} m² (${fmt(land.area_hectares, 3)} ha)`
+    : "Not applicable (KML terrain input).";
+
+  el("resPond").textContent = data.pond
+    ? `Latitude ${fmt(data.pond.latitude, 6)}, longitude ${fmt(data.pond.longitude, 6)} — elevation ${fmt(data.pond.elevation, 1)} m, slope ${fmt(data.pond.slope_degrees, 1)}°, suitability ${fmt(data.pond.suitability_score, 3)}`
+    : "No pond site found.";
+
+  el("resCatchment").textContent = data.catchment
+    ? `${fmt(data.catchment.catchment_area_sq_meters, 0)} m² (${fmt(data.catchment.catchment_area_hectares, 3)} ha), ${data.catchment.contributing_cells_count} contributing grid cells`
+    : "No catchment delineated.";
+
+  el("resRainfall").textContent = data.rainfall
+    ? `${fmt(data.rainfall.rainfall_mm, 1)} mm/year — ${data.rainfall.period} — source: ${data.rainfall.source} (${data.rainfall.dataset})`
+    : "Rainfall unavailable.";
+
+  el("resWater").textContent = data.water
+    ? `Runoff coefficient ${data.water.runoff_coefficient} → theoretical runoff ${fmt(data.water.theoretical_runoff_m3, 1)} m³; collection efficiency ${data.water.collection_efficiency} → expected collectible water ${fmt(data.water.expected_collectible_water_m3, 1)} m³`
+    : "Water estimation unavailable.";
+
+  el("resStorage").textContent = data.pond_storage
+    ? `Conceptual basin ~${fmt(data.pond_storage.storage_capacity_m3, 1)} m³: depth ${fmt(data.pond_storage.depth_m, 1)} m, top ${fmt(data.pond_storage.top_length_m, 1)} × ${fmt(data.pond_storage.top_width_m, 1)} m, surface ${fmt(data.pond_storage.surface_area_m2, 0)} m² — ${data.pond_storage.note}`
+    : "Storage sizing unavailable.";
+
+  const sources = [];
+  if (data.dem_source) {
+    sources.push(`DEM: ${data.dem_source.provider} (${data.dem_source.dataset}).`);
+    if (data.dem_source.attribution) sources.push(data.dem_source.attribution);
+  }
+  if (data.rainfall && data.rainfall.attribution) sources.push(data.rainfall.attribution);
+  sources.push(`${contourCount} contour lines derived from the DEM (interval ${data.contours ? data.contours.properties.interval_m : "n/a"} m).`);
+  el("resSources").textContent = sources.join(" ");
+
+  resultsCard.hidden = false;
+}
+
+function showError(message) {
+  errorBox.textContent = message;
+  errorBox.hidden = false;
+}
+````
+
+## File: app/static/index.html
+````html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Village Pond Planning System</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Village Pond Planning System</h1>
+    <p class="subtitle">Select a land area on the map — terrain, pond site, catchment, rainfall and water volume are computed by the backend.</p>
+  </header>
+  <main>
+    <div id="map"></div>
+    <aside id="panel">
+      <section class="card">
+        <h2>1. Select land</h2>
+        <div class="button-row">
+          <button id="startDraw" type="button">Draw polygon</button>
+          <button id="finishDraw" type="button" disabled>Finish</button>
+          <button id="clearAll" type="button" disabled>Clear</button>
+        </div>
+        <p id="drawHint" class="hint">Click (or double-click) to add vertices, then press Finish to close the polygon. Minimum 3 vertices.</p>
+      </section>
+
+      <section class="card">
+        <h2>2. Analyze</h2>
+        <button id="analyzeBtn" type="button" disabled>Analyze selected area</button>
+        <label class="checkbox-row"><input type="checkbox" id="showContours" checked /> Show terrain contours</label>
+        <div id="status" class="status" hidden>
+          <span class="spinner"></span><span id="statusText">Analyzing…</span>
+        </div>
+        <div id="error" class="error" hidden></div>
+      </section>
+
+      <section class="card" id="results" hidden>
+        <h2>3. Results</h2>
+
+        <div class="result-block">
+          <h3>Selected land</h3>
+          <div class="legend-item"><span class="swatch land"></span> Construction area</div>
+          <p id="resLand"></p>
+        </div>
+
+        <div class="result-block">
+          <h3>Suggested pond location</h3>
+          <div class="legend-item"><span class="swatch pond"></span> Pond site</div>
+          <p id="resPond"></p>
+        </div>
+
+        <div class="result-block">
+          <h3>Catchment area</h3>
+          <div class="legend-item"><span class="swatch catchment"></span> Upstream contributing area (may extend beyond the land)</div>
+          <p id="resCatchment"></p>
+        </div>
+
+        <div class="result-block">
+          <h3>Rainfall</h3>
+          <p id="resRainfall"></p>
+        </div>
+
+        <div class="result-block">
+          <h3>Expected water volume</h3>
+          <p id="resWater"></p>
+        </div>
+
+        <div class="result-block">
+          <h3>Indicative pond storage</h3>
+          <p id="resStorage"></p>
+        </div>
+
+        <p class="attribution" id="resSources"></p>
+      </section>
+    </aside>
+  </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
+````
+
+## File: app/static/style.css
+````css
+:root {
+  --border: #d4d4d8;
+  --muted: #71717a;
+  --accent: #2563eb;
+  --error-bg: #fef2f2;
+  --error-border: #fca5a5;
+}
+
+* { box-sizing: border-box; }
+
+/* Ensure the `hidden` attribute always wins over explicit display rules
+   (e.g. .status uses display:flex, which would otherwise override [hidden]). */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  color: #18181b;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: #fafafa;
+}
+
+header h1 { margin: 0; font-size: 1.15rem; }
+header .subtitle { margin: 2px 0 0; color: var(--muted); font-size: 0.85rem; }
+
+main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+#map { flex: 1; min-width: 0; }
+
+#panel {
+  width: 400px;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  padding: 12px;
+  background: #fff;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.card h2 { margin: 0 0 8px; font-size: 1rem; }
+.card h3 { margin: 0 0 4px; font-size: 0.85rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+
+.button-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+button {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+#analyzeBtn {
+  width: 100%;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+#analyzeBtn:disabled { background: #93c5fd; border-color: #93c5fd; }
+
+.hint { color: var(--muted); font-size: 0.8rem; margin: 8px 0 0; }
+
+.checkbox-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 0.85rem; }
+
+[hidden] {
+  display: none !important;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 0.9rem;
+  color: var(--accent);
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #bfdbfe;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  display: inline-block;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.error {
+  margin-top: 10px;
+  padding: 10px;
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
+  border-radius: 6px;
+  color: #b91c1c;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
+.result-block { margin-bottom: 12px; }
+.result-block p { margin: 4px 0 0; font-size: 0.88rem; line-height: 1.45; }
+
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); margin: 2px 0; }
+
+.swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.swatch.land { background: #2563eb; }
+.swatch.pond { background: #dc2626; border-radius: 50%; }
+.swatch.catchment { background: #16a34a; }
+
+.attribution { color: var(--muted); font-size: 0.72rem; border-top: 1px solid var(--border); padding-top: 8px; }
 ````
 
 ## File: app/utils/__init__.py
@@ -204,42 +1895,6 @@ def validate_contour_extension(filename: str) -> str:
 ## File: app/__init__.py
 ````python
 """Village Pond Planning System backend package."""
-````
-
-## File: app/main.py
-````python
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1.api import api_router
-from app.core.config import settings
-
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    version=settings.VERSION,
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(api_router, prefix=settings.API_V1_STR)
-
-
-@app.get("/", tags=["Root"])
-def root_endpoint():
-    return {
-        "project": settings.PROJECT_NAME,
-        "version": settings.VERSION,
-        "docs": "/docs",
-        "health": f"{settings.API_V1_STR}/health",
-    }
 ````
 
 ## File: data/sample/.gitkeep
@@ -49159,6 +50814,1594 @@ def client():
     return TestClient(app)
 ````
 
+## File: tests/test_contours.py
+````python
+import numpy as np
+import pytest
+from fastapi import HTTPException, status
+
+from app.schemas.catchment import GeographicExtent
+from app.services.contours import MAX_CONTOUR_LEVELS, ContourGenerationService
+from app.services.dem import DEMService
+from app.services.terrain import DEMData, DEMSourceInfo, TerrainModel, TerrainService
+
+# Realistic UTM zone 44N coordinates so WGS84 conversion is well defined.
+UTM_BOUNDS = (529_000.0, 530_780.0, 2_348_000.0, 2_349_780.0)  # (min_x, max_x, min_y, max_y)
+GEO_EXTENT = GeographicExtent(
+    min_longitude=81.28, max_longitude=81.30, min_latitude=21.23, max_latitude=21.25
+)
+
+
+def cone_terrain(rows=60, cols=60, resolution=30.0) -> TerrainModel:
+    """Deterministic conical hill: elevation decreases away from the grid center."""
+    cy, cx = (rows - 1) / 2.0, (cols - 1) / 2.0
+    yy, xx = np.mgrid[0:rows, 0:cols]
+    dist = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    grid = 50.0 - dist * 0.5
+    return TerrainModel(
+        elevation_grid=grid,
+        crs="EPSG:32644",
+        grid_resolution_meters=resolution,
+        bounds=UTM_BOUNDS,
+        geographic_extent=GEO_EXTENT,
+        min_elevation=float(grid.min()),
+        max_elevation=float(grid.max()),
+        slope_grid=TerrainService.calculate_slope(grid, resolution),
+    )
+
+
+def make_dem_data(grid: np.ndarray) -> DEMData:
+    return DEMData(
+        elevation_grid=grid.astype(np.float32),
+        crs="EPSG:32644",
+        resolution_meters=30.0,
+        bounds=UTM_BOUNDS,
+        geographic_extent=GEO_EXTENT,
+        source=DEMSourceInfo(provider="fake", dataset="fake", attribution="test"),
+    )
+
+
+# --- Contour levels --------------------------------------------------------------------
+
+
+def test_contour_levels_aligned_to_interval():
+    levels = ContourGenerationService.contour_levels(267.0, 298.0, 5.0)
+    assert levels[0] == 270.0  # ceil(267 / 5) * 5
+    assert levels == [270.0, 275.0, 280.0, 285.0, 290.0, 295.0]
+
+
+def test_contour_levels_capped_for_large_relief():
+    levels = ContourGenerationService.contour_levels(0.0, 1000.0, 1.0)
+    assert len(levels) <= MAX_CONTOUR_LEVELS
+    assert levels[0] >= 0.0 and levels[-1] <= 1000.0
+
+
+def test_contour_levels_rejects_sub_resolution_interval():
+    with pytest.raises(HTTPException) as exc:
+        ContourGenerationService.contour_levels(0.0, 50.0, 0.1)
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
+# --- Contour generation ----------------------------------------------------------------
+
+
+def test_generate_contours_on_cone_produces_closed_rings():
+    terrain = cone_terrain()
+    collection = ContourGenerationService.generate_contours(terrain, interval=5.0)
+
+    assert collection["type"] == "FeatureCollection"
+    features = collection["features"]
+    assert len(features) > 0
+    assert collection["properties"]["contour_count"] == len(features)
+
+    elevations = {f["properties"]["elevation_m"] for f in features}
+    assert all(lvl in elevations for lvl in (45.0, 40.0, 30.0))
+
+    for feature in features:
+        assert feature["type"] == "Feature"
+        assert feature["geometry"]["type"] == "LineString"
+        coords = feature["geometry"]["coordinates"]
+        assert len(coords) >= 2
+        for lon, lat in coords:
+            assert GEO_EXTENT.min_longitude - 0.01 <= lon <= GEO_EXTENT.max_longitude + 0.01
+            assert GEO_EXTENT.min_latitude - 0.01 <= lat <= GEO_EXTENT.max_latitude + 0.01
+
+    # Rings fully inside the grid must be closed (intermost cone contours).
+    closed = [
+        f for f in features if f["geometry"]["coordinates"][0] == f["geometry"]["coordinates"][-1]
+    ]
+    assert len(closed) >= 1
+
+
+def test_generate_contours_flat_grid_returns_empty_collection():
+    terrain = cone_terrain()
+    terrain.elevation_grid = np.full_like(terrain.elevation_grid, 42.0)
+    collection = ContourGenerationService.generate_contours(terrain, interval=5.0)
+    assert collection["features"] == []
+
+
+# --- DEM -> TerrainModel bridge (Phase 2B) ----------------------------------------------
+
+
+def test_reconstruct_terrain_from_dem():
+    grid = cone_terrain().elevation_grid
+    dem = make_dem_data(grid)
+    terrain = TerrainService.reconstruct_terrain_from_dem(dem)
+    assert isinstance(terrain, TerrainModel)
+    assert terrain.crs == "EPSG:32644"
+    assert terrain.grid_resolution_meters == 30.0
+    assert terrain.elevation_grid.shape == grid.shape
+    assert terrain.min_elevation == pytest.approx(float(grid.min()))
+    assert terrain.max_elevation == pytest.approx(float(grid.max()))
+    assert terrain.slope_grid is not None
+    assert terrain.slope_grid.shape == grid.shape
+    assert float(terrain.slope_grid.max()) > 0.0
+
+
+def test_reconstruct_terrain_from_dem_rejects_tiny_grid():
+    dem = make_dem_data(np.ones((1, 3), dtype=np.float32))
+    with pytest.raises(HTTPException) as exc:
+        TerrainService.reconstruct_terrain_from_dem(dem)
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
+# --- Endpoint integration (fake provider, no network) -----------------------------------
+
+
+def test_terrain_preview_includes_terrain_and_contours(client, monkeypatch):
+    from tests.test_dem import FakeProvider
+
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    response = client.post(
+        "/api/v1/terrainPreview",
+        json={
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [
+                        [81.290, 21.245],
+                        [81.296, 21.245],
+                        [81.296, 21.250],
+                        [81.290, 21.250],
+                        [81.290, 21.245],
+                    ]
+                ],
+            }
+        },
+    )
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+
+    assert data["terrain"] is not None
+    terrain = data["terrain"]["terrain"]
+    assert terrain["slope"] is not None
+    assert terrain["rows"] > 0 and terrain["cols"] > 0
+
+    contours = data["terrain"]["contours"]
+    assert contours is not None
+    assert contours["type"] == "FeatureCollection"
+    assert contours["properties"]["contour_count"] == len(contours["features"])
+
+
+def test_terrain_preview_can_skip_contours(client, monkeypatch):
+    from tests.test_dem import FakeProvider
+
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    response = client.post(
+        "/api/v1/terrainPreview",
+        json={
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [
+                        [81.290, 21.245],
+                        [81.296, 21.245],
+                        [81.296, 21.250],
+                        [81.290, 21.250],
+                        [81.290, 21.245],
+                    ]
+                ],
+            },
+            "include_contours": False,
+        },
+    )
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["terrain"]["contours"] is None
+````
+
+## File: tests/test_dem.py
+````python
+import os
+
+import numpy as np
+import pytest
+from fastapi import HTTPException, status
+
+from app.core.config import settings
+from app.schemas.catchment import GeographicExtent
+from app.services.dem import (
+    AWSTerrainTilesProvider,
+    DEMData,
+    DEMProvider,
+    DEMService,
+    OpenTopographyProvider,
+    bilinear_sample,
+)
+from app.main import app  # noqa: F401  (ensures routers are registered)
+
+
+# --- Helpers ---------------------------------------------------------------------------
+
+
+class FakeProvider(DEMProvider):
+    """Deterministic tilted-plane elevation source (rises with lon and lat)."""
+
+    name = "fake"
+    dataset = "fake_grid"
+    attribution = "test attribution"
+
+    def __init__(self, fail=False, nan_stride=0):
+        self.calls = 0
+        self.fail = fail
+        self.nan_stride = nan_stride
+
+    def sample(self, extent, lon, lat, target_resolution_m):
+        self.calls += 1
+        if self.fail:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="fake provider outage",
+            )
+        # Tilted plane relative to the analysis area (keeps elevations plausible).
+        elev = ((lon - 81.0) * 100.0 + (lat - 21.0) * 50.0).astype(np.float32)
+        if self.nan_stride > 0:
+            elev[:: self.nan_stride] = np.nan
+        return elev
+
+
+class FailingProvider(DEMProvider):
+    name = "failing"
+    dataset = "failing"
+    attribution = "x"
+
+    def sample(self, extent, lon, lat, target_resolution_m):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="outage")
+
+
+@pytest.fixture(autouse=True)
+def isolated_cache(tmp_path, monkeypatch):
+    DEMService._memory_cache.clear()
+    monkeypatch.setattr(settings, "DEM_CACHE_DIR", str(tmp_path / "dem_cache"))
+    yield
+    DEMService._memory_cache.clear()
+
+
+SMALL_EXTENT = GeographicExtent(
+    min_longitude=81.29,
+    max_longitude=81.30,
+    min_latitude=21.24,
+    max_latitude=21.25,
+)
+
+
+# --- Unit tests ------------------------------------------------------------------------
+
+
+def test_compute_analysis_extent_expands_bbox():
+    extent = DEMService.compute_analysis_extent(
+        GeographicExtent(
+            min_longitude=81.29,
+            max_longitude=81.30,
+            min_latitude=21.24,
+            max_latitude=21.25,
+        ),
+        500.0,
+    )
+    # At lat ~21.245: 500 m ~ 0.00452 deg lat and ~0.00484 deg lon.
+    assert extent.min_latitude < 21.24
+    assert extent.max_latitude > 21.25
+    assert extent.min_longitude < 81.29
+    assert extent.max_longitude > 81.30
+    d_lat = 21.24 - extent.min_latitude
+    assert abs(d_lat - 500.0 / 110_574.0) < 0.0005
+    d_lon = 81.29 - extent.min_longitude
+    assert abs(d_lon - 500.0 / (111_320.0 * 0.9323)) < 0.0005
+
+
+def test_zoom_selection_matches_target_resolution():
+    provider = AWSTerrainTilesProvider(timeout_s=10, max_tiles=64)
+    # At lat 21.2: z12 ~35.6 m/px (>30), z13 ~17.8 m/px (<=30).
+    assert provider._select_zoom(30.0, 21.2) == 13
+    assert provider._select_zoom(10.0, 21.2) == 14
+    assert provider._select_zoom(100.0, 21.2) == 11
+
+
+def test_bilinear_sample_center_value():
+    grid = np.array([[0.0, 10.0], [20.0, 30.0]], dtype=np.float32)
+    value = bilinear_sample(grid, np.array([0.5]), np.array([0.5]))
+    assert value[0] == pytest.approx(15.0)
+
+
+def test_bilinear_sample_clamps_out_of_range():
+    grid = np.array([[5.0, 7.0]], dtype=np.float32)
+    # Row coordinate clamps to the single row; column clamps at the edges.
+    value = bilinear_sample(grid, np.array([-3.0, 9.0]), np.array([0.0, 1.0]))
+    assert value[0] == pytest.approx(5.0)
+    assert value[1] == pytest.approx(7.0)
+
+
+def test_aai_grid_parsing_and_sampling():
+    provider = OpenTopographyProvider(
+        api_key="test-key", dataset="SRTMGL1", timeout_s=10, max_response_mb=64
+    )
+    aai_text = (
+        "ncols         3\n"
+        "nrows         2\n"
+        "xllcorner     81.0\n"
+        "yllcorner     21.0\n"
+        "cellsize      0.01\n"
+        "NODATA_value  -9999\n"
+        "10 20 30\n"
+        "40 50 60\n"
+    )
+    provider._parse(aai_text)
+    # Row 0 is the northernmost row. (81.01, 21.015) -> column 1 exactly,
+    # halfway between the two rows: (20 + 50) / 2 = 35.
+    value = provider.sample(SMALL_EXTENT, np.array([81.01]), np.array([21.015]), 30.0)
+    assert value[0] == pytest.approx(35.0, abs=0.01)
+
+
+def test_provider_chain_aws_only_without_key(monkeypatch):
+    monkeypatch.setattr(settings, "DEM_PROVIDER", "aws_terrain_tiles")
+    monkeypatch.setattr(settings, "OPEN_TOPOGRAPHY_API_KEY", "")
+    chain = DEMService._provider_chain()
+    assert [p.name for p in chain] == ["aws_terrain_tiles"]
+
+
+def test_provider_chain_includes_opentopography_with_key(monkeypatch):
+    monkeypatch.setattr(settings, "DEM_PROVIDER", "aws_terrain_tiles")
+    monkeypatch.setattr(settings, "OPEN_TOPOGRAPHY_API_KEY", "test-key")
+    chain = DEMService._provider_chain()
+    assert [p.name for p in chain] == ["aws_terrain_tiles", "opentopography"]
+
+
+def test_provider_chain_unknown_provider_rejected(monkeypatch):
+    monkeypatch.setattr(settings, "DEM_PROVIDER", "not_a_provider")
+    with pytest.raises(HTTPException) as exc:
+        DEMService._provider_chain()
+    assert exc.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
+# --- Service tests (fake provider, no network) -----------------------------------------
+
+
+def test_acquire_dem_samples_provider_grid(monkeypatch):
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    dem = DEMService.acquire_dem(SMALL_EXTENT, target_resolution_m=30.0)
+    assert isinstance(dem, DEMData)
+    assert dem.rows >= 2 and dem.cols >= 2
+    assert dem.crs.startswith("EPSG:")
+    assert dem.resolution_meters == 30.0
+    assert dem.cache_hit is False
+    assert fake.calls == 1
+    # The tilted plane rises towards north-east: max > min, both finite.
+    assert np.isfinite(dem.elevation_grid).all()
+    assert dem.elevation_grid.max() > dem.elevation_grid.min()
+
+
+def test_acquire_dem_caches_identical_requests(monkeypatch):
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    first = DEMService.acquire_dem(SMALL_EXTENT, target_resolution_m=30.0)
+    second = DEMService.acquire_dem(SMALL_EXTENT, target_resolution_m=30.0)
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert fake.calls == 1
+    assert np.array_equal(first.elevation_grid, second.elevation_grid)
+
+
+def test_acquire_dem_different_resolution_bypasses_cache(monkeypatch):
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    DEMService.acquire_dem(SMALL_EXTENT, target_resolution_m=30.0)
+    DEMService.acquire_dem(SMALL_EXTENT, target_resolution_m=50.0)
+    assert fake.calls == 2
+
+
+def test_acquire_dem_falls_back_to_second_provider(monkeypatch):
+    failing = FailingProvider()
+    fake = FakeProvider()
+    monkeypatch.setattr(
+        DEMService, "_provider_chain", staticmethod(lambda: [failing, fake])
+    )
+    dem = DEMService.acquire_dem(SMALL_EXTENT, target_resolution_m=30.0)
+    assert dem.source.provider == "fake"
+    assert fake.calls == 1
+
+
+def test_acquire_dem_all_providers_failing_raises(monkeypatch):
+    failing = FailingProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [failing]))
+    with pytest.raises(HTTPException) as exc:
+        DEMService.acquire_dem(SMALL_EXTENT, target_resolution_m=30.0)
+    assert exc.value.status_code == status.HTTP_502_BAD_GATEWAY
+
+
+def test_acquire_dem_rejects_oversized_extent(monkeypatch):
+    monkeypatch.setattr(settings, "DEM_MAX_EXTENT_KM", 1.0)
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    with pytest.raises(HTTPException) as exc:
+        DEMService.acquire_dem(SMALL_EXTENT, target_resolution_m=30.0)
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+    assert "exceeds" in exc.value.detail
+    assert fake.calls == 0
+
+
+def test_acquire_dem_fills_nodata_and_reports_count(monkeypatch):
+    fake = FakeProvider(nan_stride=7)
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    dem = DEMService.acquire_dem(SMALL_EXTENT, target_resolution_m=30.0)
+    assert np.isfinite(dem.elevation_grid).all()
+    assert dem.nodata_cells_filled > 0
+
+
+def test_acquire_dem_rejects_mostly_invalid_data(monkeypatch):
+    fake = FakeProvider(nan_stride=1)  # every cell void
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    with pytest.raises(HTTPException) as exc:
+        DEMService.acquire_dem(SMALL_EXTENT, target_resolution_m=30.0)
+    assert exc.value.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+# --- API tests (fake provider, no network) ---------------------------------------------
+
+LAND_POLYGON = {
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [81.290, 21.245],
+                [81.296, 21.245],
+                [81.296, 21.250],
+                [81.290, 21.250],
+                [81.290, 21.245],
+            ]
+        ],
+    }
+}
+
+
+def test_terrain_preview_endpoint_success(client, monkeypatch):
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    response = client.post("/api/v1/terrainPreview", json=LAND_POLYGON)
+    assert response.status_code == status.HTTP_200_OK
+
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["buffer_meters"] == 500.0
+    extent = data["analysis_extent"]
+    assert extent["min_longitude"] < LAND_POLYGON["geometry"]["coordinates"][0][0][0]
+
+    dem = data["dem"]
+    assert dem["source"]["provider"] == "fake"
+    assert dem["rows"] > 0 and dem["cols"] > 0
+    assert dem["resolution_meters"] == 30.0
+    assert dem["cache_hit"] is False
+    assert dem["crs"].startswith("EPSG:")
+    assert dem["projected_bounds"]["min_x"] < dem["projected_bounds"]["max_x"]
+    assert dem["source"]["attribution"]
+
+
+def test_terrain_preview_endpoint_cache_hit_on_repeat(client, monkeypatch):
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    first = client.post("/api/v1/terrainPreview", json=LAND_POLYGON)
+    second = client.post("/api/v1/terrainPreview", json=LAND_POLYGON)
+    assert first.status_code == status.HTTP_200_OK
+    assert second.status_code == status.HTTP_200_OK
+    assert first.json()["dem"]["cache_hit"] is False
+    assert second.json()["dem"]["cache_hit"] is True
+    assert fake.calls == 1
+
+
+def test_terrain_preview_endpoint_honors_parameter_overrides(client, monkeypatch):
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    payload = dict(LAND_POLYGON, buffer_meters=1000.0, resolution_meters=50.0)
+    response = client.post("/api/v1/terrainPreview", json=payload)
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["buffer_meters"] == 1000.0
+    assert data["dem"]["resolution_meters"] == 50.0
+
+
+def test_terrain_preview_endpoint_rejects_out_of_range_buffer(client, monkeypatch):
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    payload = dict(LAND_POLYGON, buffer_meters=99999.0)
+    response = client.post("/api/v1/terrainPreview", json=payload)
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+def test_terrain_preview_endpoint_rejects_oversized_analysis_extent(client, monkeypatch):
+    monkeypatch.setattr(settings, "DEM_MAX_EXTENT_KM", 1.0)
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    response = client.post("/api/v1/terrainPreview", json=LAND_POLYGON)
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "exceeds" in response.json()["detail"]
+
+
+def test_terrain_preview_endpoint_invalid_geometry(client):
+    response = client.post(
+        "/api/v1/terrainPreview",
+        json={"geometry": {"type": "Polygon", "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]]}},
+    )
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+# --- Opt-in live test (real network) ---------------------------------------------------
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_LIVE_DEM_TESTS") != "1",
+    reason="Live DEM test requires network access; set RUN_LIVE_DEM_TESTS=1 to enable.",
+)
+def test_live_aws_terrain_tiles_acquire(client):
+    live_extent = GeographicExtent(
+        min_longitude=81.28,
+        max_longitude=81.32,
+        min_latitude=21.24,
+        max_latitude=21.26,
+    )
+    dem = DEMService.acquire_dem(live_extent, target_resolution_m=30.0)
+    assert dem.rows >= 10 and dem.cols >= 10
+    assert dem.source.provider == "aws_terrain_tiles"
+    assert np.isfinite(dem.elevation_grid).all()
+    assert 0.0 <= float(dem.elevation_grid.mean()) <= 3000.0
+````
+
+## File: tests/test_land.py
+````python
+import math
+
+from fastapi import status
+
+BASE_SQUARE = [
+    [77.1025, 28.7041],
+    [77.1035, 28.7041],
+    [77.1035, 28.7051],
+    [77.1025, 28.7051],
+    [77.1025, 28.7041],
+]
+
+
+def polygon_payload(coordinates=None, geom_type="Polygon"):
+    if coordinates is None:
+        coordinates = [BASE_SQUARE]
+    if geom_type == "Polygon":
+        geometry = {"type": "Polygon", "coordinates": coordinates}
+    else:
+        geometry = {"type": "MultiPolygon", "coordinates": coordinates}
+    return {"geometry": geometry}
+
+
+def post_geometry(client, payload):
+    return client.post("/api/v1/analyzeLand", json=payload)
+
+
+def test_analyze_land_valid_polygon(client):
+    response = post_geometry(client, polygon_payload())
+    assert response.status_code == status.HTTP_200_OK
+
+    data = response.json()
+    assert data["status"] == "success"
+    assert "selected_land" in data
+
+    land = data["selected_land"]
+    assert land["geometry_type"] == "Polygon"
+    assert land["geometry"]["type"] == "Polygon"
+
+    # ~0.001° x 0.001° square near 28.7°N: roughly 111 m x 98 m ~= 10,900 m².
+    assert 8_000.0 < land["area_m2"] < 13_000.0
+    assert math.isclose(land["area_hectares"], land["area_m2"] / 10_000.0, abs_tol=0.0001)
+
+    bbox = land["bounding_box"]
+    assert bbox["min_longitude"] == 77.1025
+    assert bbox["max_longitude"] == 77.1035
+    assert bbox["min_latitude"] == 28.7041
+    assert bbox["max_latitude"] == 28.7051
+
+    centroid = land["centroid"]
+    assert math.isclose(centroid["latitude"], 28.7046, abs_tol=0.0005)
+    assert math.isclose(centroid["longitude"], 77.1030, abs_tol=0.0005)
+    assert bbox["min_longitude"] <= centroid["longitude"] <= bbox["max_longitude"]
+    assert bbox["min_latitude"] <= centroid["latitude"] <= bbox["max_latitude"]
+
+
+def test_analyze_land_valid_multipolygon(client):
+    shifted = [[lon + 0.01, lat] for lon, lat in BASE_SQUARE]
+    response = post_geometry(
+        client, polygon_payload([[BASE_SQUARE], [shifted]], geom_type="MultiPolygon")
+    )
+    assert response.status_code == status.HTTP_200_OK
+
+    land = response.json()["selected_land"]
+    assert land["geometry_type"] == "MultiPolygon"
+
+    single = post_geometry(client, polygon_payload()).json()["selected_land"]
+    # Two disjoint equal squares: total geodesic area must be ~double a single square.
+    assert math.isclose(land["area_m2"], 2.0 * single["area_m2"], rel_tol=0.01)
+
+
+def test_analyze_land_polygon_with_hole(client):
+    outer = [
+        [77.1025, 28.7041],
+        [77.1045, 28.7041],
+        [77.1045, 28.7061],
+        [77.1025, 28.7061],
+        [77.1025, 28.7041],
+    ]
+    hole = [
+        [77.1030, 28.7046],
+        [77.1040, 28.7046],
+        [77.1040, 28.7056],
+        [77.1030, 28.7056],
+        [77.1030, 28.7046],
+    ]
+    solid = post_geometry(client, polygon_payload([outer])).json()["selected_land"]
+    with_hole = post_geometry(client, polygon_payload([outer, hole])).json()["selected_land"]
+
+    assert with_hole["area_m2"] < solid["area_m2"]
+    # The hole is 1/4 of the outer square, so remaining area is ~3/4 of solid.
+    assert math.isclose(with_hole["area_m2"], 0.75 * solid["area_m2"], rel_tol=0.01)
+
+
+def test_analyze_land_accepts_3d_positions(client):
+    coords = [[77.1025, 28.7041, 0.0], [77.1035, 28.7041, 0.0], [77.1035, 28.7051, 0.0], [77.1025, 28.7051, 0.0], [77.1025, 28.7041, 0.0]]
+    response = post_geometry(client, polygon_payload([coords]))
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["selected_land"]["area_m2"] > 0
+
+
+def test_analyze_land_rejects_non_polygon_geojson(client):
+    response = post_geometry(client, {"geometry": {"type": "Point", "coordinates": [77.1, 28.7]}})
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+def test_analyze_land_rejects_unclosed_ring(client):
+    open_ring = BASE_SQUARE[:-1]
+    response = post_geometry(client, polygon_payload([open_ring]))
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "closed" in response.json()["detail"].lower()
+
+
+def test_analyze_land_rejects_ring_with_too_few_positions(client):
+    coords = [[77.1025, 28.7041], [77.1035, 28.7051]]
+    response = post_geometry(client, polygon_payload([coords]))
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_analyze_land_rejects_zero_area_polygon(client):
+    collinear = [
+        [77.1025, 28.7041],
+        [77.1030, 28.7046],
+        [77.1035, 28.7051],
+        [77.1040, 28.7056],
+        [77.1025, 28.7041],
+    ]
+    response = post_geometry(client, polygon_payload([collinear]))
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "area" in response.json()["detail"].lower()
+
+
+def test_analyze_land_rejects_out_of_range_coordinates(client):
+    coords = [
+        [77.1025, 28.7041],
+        [77.1035, 28.7041],
+        [77.1035, 28.7051],
+        [200.0, 28.7051],
+        [77.1025, 28.7041],
+    ]
+    response = post_geometry(client, polygon_payload([coords]))
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "longitude" in response.json()["detail"].lower()
+
+
+def test_analyze_land_rejects_self_intersecting_polygon(client):
+    bowtie = [
+        [77.1025, 28.7041],
+        [77.1035, 28.7051],
+        [77.1035, 28.7041],
+        [77.1025, 28.7051],
+        [77.1025, 28.7041],
+    ]
+    response = post_geometry(client, polygon_payload([bowtie]))
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_analyze_land_rejects_oversized_selection(client):
+    # ~0.5° x 0.5° square (~3000 km²) exceeds the configured 100 km² cap.
+    coords = [
+        [77.0, 28.0],
+        [77.5, 28.0],
+        [77.5, 28.5],
+        [77.0, 28.5],
+        [77.0, 28.0],
+    ]
+    response = post_geometry(client, polygon_payload([coords]))
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "exceeds" in response.json()["detail"].lower()
+
+
+def test_analyze_land_rejects_antimeridian_crossing(client):
+    coords = [
+        [179.95, 10.0],
+        [-179.95, 10.0],
+        [-179.95, 10.01],
+        [179.95, 10.01],
+        [179.95, 10.0],
+    ]
+    response = post_geometry(client, polygon_payload([coords]))
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "antimeridian" in response.json()["detail"].lower()
+
+
+def test_analyze_land_rejects_empty_multipolygon(client):
+    response = post_geometry(client, polygon_payload([], geom_type="MultiPolygon"))
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_analyze_land_rejects_missing_geometry(client):
+    response = client.post("/api/v1/analyzeLand", json={"properties": {}})
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+````
+
+## File: tests/test_limits_and_frontend.py
+````python
+import io
+import math
+
+from fastapi import status
+
+from app.core.config import settings
+
+from tests.test_catchment import VALID_KML_CONTENT
+
+
+def _circle_polygon(center_lon=81.29, center_lat=21.245, radius_deg=0.003, points=2100):
+    coords = []
+    for i in range(points):
+        angle = 2 * math.pi * i / (points - 1)
+        coords.append(
+            [center_lon + radius_deg * math.cos(angle), center_lat + radius_deg * math.sin(angle)]
+        )
+    coords.append(list(coords[0]))  # close
+    return {
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [coords],
+        }
+    }
+
+
+# --- Phase 10: request-size guards -----------------------------------------------------
+
+
+def test_land_vertex_limit_enforced(client, monkeypatch):
+    monkeypatch.setattr(settings, "MAX_LAND_VERTICES", 100)
+    payload = _circle_polygon(points=150)
+    response = client.post("/api/v1/analyzeLand", json=payload)
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "vertices" in response.json()["detail"]
+
+
+def test_land_many_vertices_accepted_when_under_limit(client):
+    payload = _circle_polygon(points=60)
+    response = client.post("/api/v1/analyzeLand", json=payload)
+    assert response.status_code == status.HTTP_200_OK
+
+
+def test_kml_upload_size_limit_enforced(client, monkeypatch):
+    monkeypatch.setattr(settings, "MAX_UPLOAD_SIZE_MB", 0.0001)  # ~104 bytes
+    files = {"file": ("contours.kml", VALID_KML_CONTENT, "application/vnd.google-earth.kml+xml")}
+    response = client.post("/api/v1/findCatchment", files=files)
+    assert response.status_code == status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+    assert "maximum accepted size" in response.json()["detail"]
+
+
+# --- Phase 9: frontend is served by the backend ----------------------------------------
+
+
+def test_frontend_index_served(client):
+    response = client.get("/app/")
+    assert response.status_code == status.HTTP_200_OK
+    body = response.text
+    assert 'id="map"' in body
+    assert "app.js" in body
+    assert "leaflet" in body.lower()
+
+
+def test_frontend_assets_served(client):
+    response = client.get("/app/app.js")
+    assert response.status_code == status.HTTP_200_OK
+    assert "analyzePondSite" in response.text
+
+    css = client.get("/app/style.css")
+    assert css.status_code == status.HTTP_200_OK
+
+
+def test_root_advertises_frontend(client):
+    response = client.get("/")
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["frontend"] == "/app/"
+````
+
+## File: tests/test_pond_site.py
+````python
+import json
+
+import pytest
+from fastapi import status
+
+from app.core.config import settings
+from app.services.dem import DEMService
+from app.services.rainfall import RainfallService
+from tests.test_dem import FakeProvider
+from tests.test_rainfall import OPEN_METEO_PAYLOAD
+
+LAND_POLYGON = {
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [81.290, 21.245],
+                [81.296, 21.245],
+                [81.296, 21.250],
+                [81.290, 21.250],
+                [81.290, 21.245],
+            ]
+        ],
+    }
+}
+
+VALID_KML_CONTENT = b"""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <Placemark>
+      <name>100.0</name>
+      <LineString><coordinates>77.1025,28.7041 77.1040,28.7048</coordinates></LineString>
+    </Placemark>
+    <Placemark>
+      <name>95.0</name>
+      <LineString><coordinates>77.1018,28.7034 77.1035,28.7042</coordinates></LineString>
+    </Placemark>
+  </Document>
+</kml>
+"""
+
+
+@pytest.fixture(autouse=True)
+def isolated_caches(tmp_path, monkeypatch):
+    DEMService._memory_cache.clear()
+    RainfallService._memory_cache.clear()
+    monkeypatch.setattr(settings, "DEM_CACHE_DIR", str(tmp_path / "dem_cache"))
+    monkeypatch.setattr(settings, "RAINFALL_CACHE_DIR", str(tmp_path / "rain_cache"))
+    yield
+    DEMService._memory_cache.clear()
+    RainfallService._memory_cache.clear()
+
+
+@pytest.fixture
+def fake_external_providers(monkeypatch):
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [FakeProvider()]))
+    monkeypatch.setattr(
+        RainfallService, "_http_get_json", staticmethod(lambda url, params: OPEN_METEO_PAYLOAD)
+    )
+
+
+def test_full_analysis_with_automatic_dem(client, fake_external_providers):
+    response = client.post(
+        "/api/v1/analyzePondSite",
+        data={"request": json.dumps(LAND_POLYGON)},
+    )
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+
+    assert data["status"] == "success"
+    # Selected land
+    land = data["selected_land"]
+    assert land["area_m2"] > 0
+    assert land["geometry"]["type"] == "Polygon"
+    # Terrain + contours
+    assert data["terrain"]["slope"] is not None
+    assert data["contours"]["type"] == "FeatureCollection"
+    assert data["dem_source"]["provider"] == "fake"
+    # Pond
+    pond = data["pond"]
+    assert pond is not None
+    assert 0.0 <= pond["suitability_score"] <= 1.0
+    # Catchment
+    catchment = data["catchment"]
+    assert catchment["catchment_area_sq_meters"] > 0
+    assert catchment["boundary"]["geometry"]["type"] in ("Polygon", "MultiPolygon")
+    # Rainfall
+    rainfall = data["rainfall"]
+    assert rainfall["source"] == "open-meteo"
+    assert rainfall["rainfall_mm"] > 0
+    assert "ERA5" in rainfall["dataset"]
+    # Water: transparent chain area x rainfall(m) x coefficient, then efficiency.
+    water = data["water"]
+    expected_theoretical = (
+        catchment["catchment_area_sq_meters"] * (rainfall["rainfall_mm"] / 1000.0) * water["runoff_coefficient"]
+    )
+    assert water["theoretical_runoff_m3"] == pytest.approx(expected_theoretical, rel=1e-3)
+    assert water["expected_collectible_water_m3"] == pytest.approx(
+        water["theoretical_runoff_m3"] * water["collection_efficiency"], rel=1e-3
+    )
+    # Storage distinct from runoff, sized to the collectible inflow.
+    storage = data["pond_storage"]
+    assert storage["design_inflow_m3"] == pytest.approx(
+        water["expected_collectible_water_m3"], rel=1e-3
+    )
+    assert storage["storage_capacity_m3"] == pytest.approx(
+        water["expected_collectible_water_m3"], rel=0.05
+    )
+    assert "not a substitute" in storage["note"].lower()
+
+
+def test_full_analysis_pond_inside_selected_land(client, fake_external_providers):
+    from shapely.geometry import Point, shape
+
+    response = client.post(
+        "/api/v1/analyzePondSite",
+        data={"request": json.dumps(LAND_POLYGON)},
+    )
+    assert response.status_code == status.HTTP_200_OK
+    pond = response.json()["pond"]
+    land_geom = shape(LAND_POLYGON["geometry"])
+    assert land_geom.contains(Point(pond["longitude"], pond["latitude"]))
+
+
+def test_full_analysis_kml_fallback_path(client, fake_external_providers):
+    files = {"file": ("contours.kml", VALID_KML_CONTENT, "application/vnd.google-earth.kml+xml")}
+    response = client.post("/api/v1/analyzePondSite", files=files)
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["selected_land"] is None
+    assert data["dem_source"] is None
+    assert data["pond"] is not None
+    assert data["catchment"] is not None
+    assert data["rainfall"]["source"] == "open-meteo"
+    assert data["water"]["expected_collectible_water_m3"] > 0
+
+
+def test_analysis_with_explicit_parameters(client, fake_external_providers):
+    payload = dict(
+        LAND_POLYGON,
+        analysis_parameters={
+            "buffer_meters": 300.0,
+            "runoff_coefficient": 0.45,
+            "collection_efficiency": 0.8,
+            "contour_interval_m": 10.0,
+        },
+    )
+    response = client.post(
+        "/api/v1/analyzePondSite",
+        data={"request": json.dumps(payload)},
+    )
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["water"]["runoff_coefficient"] == 0.45
+    assert data["water"]["collection_efficiency"] == 0.8
+    assert "explicitly provided" in data["water"]["runoff_coefficient_basis"].lower()
+
+
+def test_analysis_requires_exactly_one_terrain_source(client, fake_external_providers):
+    # Neither geometry nor file.
+    response = client.post("/api/v1/analyzePondSite", data={})
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    # Both at once.
+    files = {"file": ("contours.kml", VALID_KML_CONTENT, "application/vnd.google-earth.kml+xml")}
+    response = client.post(
+        "/api/v1/analyzePondSite",
+        files=files,
+        data={"request": json.dumps(LAND_POLYGON)},
+    )
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_analysis_invalid_request_json_rejected(client):
+    response = client.post("/api/v1/analyzePondSite", data={"request": "{not json"})
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+def test_analysis_invalid_geometry_rejected(client, fake_external_providers):
+    payload = {"geometry": {"type": "Polygon", "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]]}}
+    response = client.post("/api/v1/analyzePondSite", data={"request": json.dumps(payload)})
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_analysis_selection_smaller_than_grid_cell_rejected(client, fake_external_providers):
+    tiny = {
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+                [
+                    [81.290000, 21.245000],
+                    [81.290010, 21.245000],
+                    [81.290010, 21.245010],
+                    [81.290000, 21.245010],
+                    [81.290000, 21.245000],
+                ]
+            ],
+        }
+    }
+    response = client.post("/api/v1/analyzePondSite", data={"request": json.dumps(tiny)})
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+    assert "No suitable pond location" in response.json()["detail"]
+````
+
+## File: tests/test_pond_siting.py
+````python
+import numpy as np
+import pytest
+from fastapi import status
+from shapely.geometry import Point, Polygon, shape as shape_from_geojson
+
+from app.schemas.catchment import GeographicExtent, PondCandidateSite
+from app.services.candidate_selection import (
+    CandidateScoringConfig,
+    CandidateSelectionService,
+)
+from app.services.dem import DEMService
+from app.services.hydrology import HydrologyService
+from app.services.terrain import TerrainModel, TerrainService
+
+# Realistic UTM zone 44N bounds (min_x, max_x, min_y, max_y) for a 66x66 @ 30 m grid.
+BOUNDS = (529_000.0, 530_980.0, 2_348_000.0, 2_349_980.0)
+GEO_EXTENT = GeographicExtent(
+    min_longitude=81.27, max_longitude=81.32, min_latitude=21.22, max_latitude=21.26
+)
+
+
+def funnel_terrain(rows=66, cols=66, resolution=30.0) -> TerrainModel:
+    """V-shaped valley draining south along a central channel (deterministic).
+
+    Water converges to the channel (column cx) and flows toward row 0 (south),
+    so the catchment of any in-channel cell is the long upstream strip.
+    """
+    cx = (cols - 1) / 2.0
+    yy, xx = np.mgrid[0:rows, 0:cols]
+    grid = 40.0 + np.abs(xx - cx) * 0.4 + yy * 0.05
+    return TerrainModel(
+        elevation_grid=grid,
+        crs="EPSG:32644",
+        grid_resolution_meters=resolution,
+        bounds=BOUNDS,
+        geographic_extent=GEO_EXTENT,
+        min_elevation=float(grid.min()),
+        max_elevation=float(grid.max()),
+        slope_grid=TerrainService.calculate_slope(grid, resolution),
+    )
+
+
+LAND_RECT = Polygon(
+    [
+        (81.287, 21.238),
+        (81.293, 21.238),
+        (81.293, 21.242),
+        (81.287, 21.242),
+        (81.287, 21.238),
+    ]
+)
+
+
+def config_with_small_nms() -> CandidateScoringConfig:
+    cfg = CandidateSelectionService.FLOW_WEIGHTED_CONFIG
+    return CandidateScoringConfig(
+        slope_weight=cfg.slope_weight,
+        elevation_weight=cfg.elevation_weight,
+        flow_weight=cfg.flow_weight,
+        min_distance_meters=60.0,  # small grid: allow multiple nearby candidates
+    )
+
+
+# --- Phase 3: land mask + constrained candidates ---------------------------------------
+
+
+def test_mask_cells_within_polygon():
+    terrain = funnel_terrain()
+    mask = TerrainService.mask_cells_within_polygon(terrain, LAND_RECT)
+    assert mask.shape == terrain.elevation_grid.shape
+    assert mask.any()
+
+    # Every masked cell center must lie inside the polygon; none outside.
+    min_x, _, min_y, _ = terrain.bounds
+    res = terrain.grid_resolution_meters
+    rr, cc = np.nonzero(mask)
+    for r, c in zip(rr, cc):
+        x = min_x + c * res
+        y = min_y + r * res
+        to_wgs = __import__("pyproj").Transformer.from_crs(
+            terrain.crs, "EPSG:4326", always_xy=True
+        )
+        lon, lat = to_wgs.transform(x, y)
+        assert LAND_RECT.contains(Point(lon, lat))
+
+
+def test_mask_cells_outside_terrain_extent_is_empty():
+    terrain = funnel_terrain()
+    far_polygon = Polygon(
+        [(10.0, 10.0), (11.0, 10.0), (11.0, 11.0), (10.0, 11.0), (10.0, 10.0)]
+    )
+    mask = TerrainService.mask_cells_within_polygon(terrain, far_polygon)
+    assert not mask.any()
+
+
+def test_identify_candidates_respects_land_mask():
+    terrain = funnel_terrain()
+    mask = TerrainService.mask_cells_within_polygon(terrain, LAND_RECT)
+    filled = HydrologyService.condition_dem(terrain.elevation_grid)
+    fdir = HydrologyService.calculate_flow_direction(filled, terrain.grid_resolution_meters)
+    acc = HydrologyService.calculate_flow_accumulation(fdir, filled)
+
+    candidates = CandidateSelectionService.identify_candidates(
+        terrain,
+        config=config_with_small_nms(),
+        flow_accumulation=acc,
+        candidate_mask=mask,
+    )
+    assert len(candidates) > 0
+    for cand in candidates:
+        assert LAND_RECT.contains(Point(cand.longitude, cand.latitude))
+        assert "flow_score" in cand.factor_scores
+
+    # Flow-weighted profile must prefer the drainage channel: the primary candidate
+    # should carry a strong flow score, not merely be the lowest elevation cell.
+    assert candidates[0].factor_scores["flow_score"] > 0.5
+
+
+def test_identify_candidates_empty_mask_returns_empty():
+    terrain = funnel_terrain()
+    empty_mask = np.zeros(terrain.elevation_grid.shape, dtype=bool)
+    candidates = CandidateSelectionService.identify_candidates(
+        terrain,
+        config=config_with_small_nms(),
+        candidate_mask=empty_mask,
+    )
+    assert candidates == []
+
+
+def test_identify_candidates_without_mask_unchanged():
+    """Backwards compatibility: no mask -> identical results as before."""
+    terrain = funnel_terrain()
+    filled = HydrologyService.condition_dem(terrain.elevation_grid)
+    fdir = HydrologyService.calculate_flow_direction(filled, terrain.grid_resolution_meters)
+    acc = HydrologyService.calculate_flow_accumulation(fdir, filled)
+
+    candidates = CandidateSelectionService.identify_candidates(
+        terrain, config=config_with_small_nms(), flow_accumulation=acc
+    )
+    assert len(candidates) > 0
+
+
+# --- Phase 4: catchment on precomputed grids -------------------------------------------
+
+
+def _hydrology_grids(terrain: TerrainModel):
+    filled = HydrologyService.condition_dem(terrain.elevation_grid)
+    fdir = HydrologyService.calculate_flow_direction(filled, terrain.grid_resolution_meters)
+    acc = HydrologyService.calculate_flow_accumulation(fdir, filled)
+    return filled, fdir, acc
+
+
+def _candidate(r: int, c: int, terrain: TerrainModel) -> PondCandidateSite:
+    import pyproj
+
+    min_x, _, min_y, _ = terrain.bounds
+    res = terrain.grid_resolution_meters
+    to_wgs = pyproj.Transformer.from_crs(terrain.crs, "EPSG:4326", always_xy=True)
+    lon, lat = to_wgs.transform(min_x + c * res, min_y + r * res)
+    return PondCandidateSite(
+        id="t", rank=1, latitude=float(lat), longitude=float(lon),
+        elevation=float(terrain.elevation_grid[r, c]),
+        slope_degrees=float(terrain.slope_grid[r, c]),
+        suitability_score=1.0,
+    )
+
+
+def test_analyze_hydrology_precomputed_matches_recomputed():
+    terrain = funnel_terrain()
+    cand = _candidate(33, 33, terrain)
+
+    direct = HydrologyService.analyze_hydrology(terrain, cand)
+    filled, fdir, acc = _hydrology_grids(terrain)
+    shared = HydrologyService.analyze_hydrology(
+        terrain, cand, conditioned_dem=filled, flow_direction=fdir, flow_accumulation=acc
+    )
+    assert shared.catchment_area_sq_meters == direct.catchment_area_sq_meters
+    assert shared.contributing_cells_count == direct.contributing_cells_count
+    assert shared.snapped_outlet.longitude == pytest.approx(direct.snapped_outlet.longitude)
+    assert (
+        shared.boundary.geometry["coordinates"]
+        == direct.boundary.geometry["coordinates"]
+    )
+
+
+def test_catchment_extends_beyond_selected_land():
+    terrain = funnel_terrain()
+    mask = TerrainService.mask_cells_within_polygon(terrain, LAND_RECT)
+    land_cells = int(mask.sum())
+    assert land_cells > 0
+
+    filled, fdir, acc = _hydrology_grids(terrain)
+    candidates = CandidateSelectionService.identify_candidates(
+        terrain,
+        config=config_with_small_nms(),
+        flow_accumulation=acc,
+        candidate_mask=mask,
+    )
+    pond = candidates[0]
+    catchment = HydrologyService.analyze_hydrology(
+        terrain,
+        pond,
+        conditioned_dem=filled,
+        flow_direction=fdir,
+        flow_accumulation=acc,
+    )
+    # The catchment feeding the in-land pond must NOT be clipped to the land:
+    # in the funnel terrain the upstream strip covers far more cells than the land.
+    assert catchment.contributing_cells_count > land_cells
+    assert catchment.catchment_area_sq_meters > land_cells * terrain.grid_resolution_meters**2
+
+    # Catchment polygon is GeoJSON directly usable by a frontend map.
+    assert catchment.boundary.type == "Feature"
+    assert catchment.boundary.geometry["type"] in ("Polygon", "MultiPolygon")
+
+
+# --- Endpoint integration (fake provider, no network) -----------------------------------
+
+LAND_POLYGON = {
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [81.290, 21.245],
+                [81.296, 21.245],
+                [81.296, 21.250],
+                [81.290, 21.250],
+                [81.290, 21.245],
+            ]
+        ],
+    }
+}
+
+
+def test_terrain_preview_with_analysis(client, monkeypatch):
+    from tests.test_dem import FakeProvider
+
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    response = client.post(
+        "/api/v1/terrainPreview",
+        json=dict(LAND_POLYGON, include_analysis=True),
+    )
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+
+    siting = data["pond_siting"]
+    assert siting is not None
+    assert siting["land_masked_cell_count"] > 0
+    assert len(siting["candidate_sites"]) > 0
+    assert siting["scoring_config"]["flow_weight"] > 0.0
+
+    land_geom = shape_from_geojson(LAND_POLYGON["geometry"])
+    for cand in siting["candidate_sites"]:
+        point = Point(cand["longitude"], cand["latitude"])
+        assert land_geom.contains(point)
+
+    assert siting["selected_pond"]["id"] == siting["candidate_sites"][0]["id"]
+
+    catchment = siting["catchment"]
+    assert catchment is not None
+    assert catchment["catchment_area_sq_meters"] > 0
+    assert catchment["boundary"]["geometry"]["type"] in ("Polygon", "MultiPolygon")
+    # Catchment extends beyond the selected land (documented Phase 3/4 rule): the
+    # catchment geometry must not be fully contained in the land bounding box.
+    ring = catchment["boundary"]["geometry"]["coordinates"][0]
+    lons = [pt[0] for pt in ring]
+    lats = [pt[1] for pt in ring]
+    land_bbox = land_geom.bounds  # (min_lon, min_lat, max_lon, max_lat)
+    escapes_land_bbox = (
+        max(lons) > land_bbox[2] + 1e-6
+        or min(lons) < land_bbox[0] - 1e-6
+        or max(lats) > land_bbox[3] + 1e-6
+        or min(lats) < land_bbox[1] - 1e-6
+    )
+    assert escapes_land_bbox
+
+
+def test_terrain_preview_without_analysis_has_no_siting(client, monkeypatch):
+    from tests.test_dem import FakeProvider
+
+    fake = FakeProvider()
+    monkeypatch.setattr(DEMService, "_provider_chain", staticmethod(lambda: [fake]))
+    response = client.post("/api/v1/terrainPreview", json=LAND_POLYGON)
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["pond_siting"] is None
+````
+
+## File: tests/test_rainfall.py
+````python
+import pytest
+from fastapi import HTTPException, status
+
+from app.core.config import settings
+from app.services.rainfall import RainfallService
+
+
+@pytest.fixture(autouse=True)
+def isolated_cache(tmp_path, monkeypatch):
+    RainfallService._memory_cache.clear()
+    monkeypatch.setattr(settings, "RAINFALL_CACHE_DIR", str(tmp_path / "rain_cache"))
+    yield
+    RainfallService._memory_cache.clear()
+
+
+OPEN_METEO_PAYLOAD = {
+    "daily": {
+        "time": ["2020-01-01", "2020-01-02", "2020-06-15", "2021-01-01", "2021-07-20"],
+        "precipitation_sum": [10.0, 20.0, 100.0, 5.0, 200.0],
+    }
+}
+
+NASA_POWER_PAYLOAD = {
+    "properties": {
+        "parameter": {
+            "PRECTOTCORR": {
+                "JAN": 1.0,
+                "FEB": 1.0,
+                "MAR": 1.0,
+                "APR": 2.0,
+                "MAY": 2.0,
+                "JUN": 5.0,
+                "JUL": 8.0,
+                "AUG": 7.0,
+                "SEP": 5.0,
+                "OCT": 2.0,
+                "NOV": 1.0,
+                "DEC": 1.0,
+                "ANN": 3.0,
+            }
+        }
+    }
+}
+
+
+def test_open_meteo_parsing():
+    calls = []
+
+    def fake_get_json(url, params):
+        calls.append(url)
+        assert "archive-api.open-meteo.com" in url
+        return OPEN_METEO_PAYLOAD
+
+    RainfallService._http_get_json = staticmethod(fake_get_json)
+    try:
+        result = RainfallService.get_rainfall(21.25, 81.29)
+    finally:
+        del RainfallService._http_get_json
+    assert result.source == "open-meteo"
+    assert result.units == "mm/year"
+    # Annual totals: 2020 = 130.0, 2021 = 205.0 -> mean 167.5
+    assert result.rainfall_mm == pytest.approx(167.5)
+    assert result.cache_hit is False
+    assert result.fetched_at
+    assert result.monthly_mm is not None and len(result.monthly_mm) == 12
+    assert len(calls) == 1
+
+
+def test_fallback_to_nasa_power_on_primary_failure():
+    def fake_get_json(url, params):
+        if "open-meteo" in url:
+            raise HTTPException(status_code=502, detail="primary down")
+        assert "power.larc.nasa.gov" in url
+        return NASA_POWER_PAYLOAD
+
+    RainfallService._http_get_json = staticmethod(fake_get_json)
+    try:
+        result = RainfallService.get_rainfall(21.25, 81.29)
+    finally:
+        del RainfallService._http_get_json
+    assert result.source == "nasa-power"
+    # ANN 3.0 mm/day * 365.25
+    assert result.rainfall_mm == pytest.approx(3.0 * 365.25, rel=1e-3)
+    assert result.monthly_mm[6] == pytest.approx(8.0 * 31, rel=1e-3)  # JUL
+
+
+def test_all_providers_failing_raises_502():
+    def fake_get_json(url, params):
+        raise HTTPException(status_code=502, detail="down")
+
+    RainfallService._http_get_json = staticmethod(fake_get_json)
+    try:
+        with pytest.raises(HTTPException) as exc:
+            RainfallService.get_rainfall(21.25, 81.29)
+    finally:
+        del RainfallService._http_get_json
+    assert exc.value.status_code == status.HTTP_502_BAD_GATEWAY
+    assert "open-meteo" in exc.value.detail and "nasa-power" in exc.value.detail
+
+
+def test_identical_requests_are_cached():
+    calls = []
+
+    def fake_get_json(url, params):
+        calls.append(url)
+        return OPEN_METEO_PAYLOAD
+
+    RainfallService._http_get_json = staticmethod(fake_get_json)
+    try:
+        first = RainfallService.get_rainfall(21.25, 81.29)
+        second = RainfallService.get_rainfall(21.25, 81.29)
+    finally:
+        del RainfallService._http_get_json
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert second.rainfall_mm == first.rainfall_mm
+    assert len(calls) == 1
+
+
+def test_nearby_coordinates_share_cache_entry():
+    calls = []
+
+    def fake_get_json(url, params):
+        calls.append(url)
+        return OPEN_METEO_PAYLOAD
+
+    RainfallService._http_get_json = staticmethod(fake_get_json)
+    try:
+        RainfallService.get_rainfall(21.251, 81.291)
+        RainfallService.get_rainfall(21.2549, 81.2949)
+    finally:
+        del RainfallService._http_get_json
+    # Both round to (21.25, 81.29) -> one provider call.
+    assert len(calls) == 1
+
+
+def test_rejects_out_of_range_coordinates():
+    with pytest.raises(HTTPException) as exc:
+        RainfallService.get_rainfall(120.0, 81.29)
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_open_meteo_insufficient_data_falls_back():
+    def fake_get_json(url, params):
+        if "open-meteo" in url:
+            return {"daily": {"time": [], "precipitation_sum": []}}
+        return NASA_POWER_PAYLOAD
+
+    RainfallService._http_get_json = staticmethod(fake_get_json)
+    try:
+        result = RainfallService.get_rainfall(21.25, 81.29)
+    finally:
+        del RainfallService._http_get_json
+    assert result.source == "nasa-power"
+
+
+def test_open_meteo_invalid_structure_raises_and_falls_back():
+    def fake_get_json(url, params):
+        if "open-meteo" in url:
+            return {"unexpected": True}
+        return NASA_POWER_PAYLOAD
+
+    RainfallService._http_get_json = staticmethod(fake_get_json)
+    try:
+        result = RainfallService.get_rainfall(21.25, 81.29)
+    finally:
+        del RainfallService._http_get_json
+    assert result.source == "nasa-power"
+````
+
+## File: tests/test_water.py
+````python
+import pytest
+from fastapi import HTTPException, status
+
+from app.services.pond import PondStorageService
+from app.services.water import WaterVolumeService
+
+
+# --- Phase 6: water volume --------------------------------------------------------------
+
+
+def test_runoff_calculation_and_units():
+    # 10,000 m2 x 1000 mm (1 m) x 0.30 = 3,000 m3 theoretical.
+    result = WaterVolumeService.estimate(10_000.0, 1000.0, "2015-2024")
+    assert result.theoretical_runoff_m3 == pytest.approx(3000.0)
+    assert result.expected_collectible_water_m3 == pytest.approx(3000.0 * 0.75)
+    assert result.runoff_coefficient == 0.30
+    assert result.collection_efficiency == 0.75
+    assert result.rainfall_period == "2015-2024"
+
+
+def test_explicit_coefficient_overrides_default():
+    result = WaterVolumeService.estimate(10_000.0, 500.0, "p", runoff_coefficient=0.5)
+    assert result.theoretical_runoff_m3 == pytest.approx(2500.0)
+    assert "explicitly provided" in result.runoff_coefficient_basis.lower()
+
+
+def test_efficiency_distinguishes_collectible_from_theoretical():
+    result = WaterVolumeService.estimate(1000.0, 100.0, "p")
+    assert result.expected_collectible_water_m3 < result.theoretical_runoff_m3
+
+
+def test_zero_rainfall_gives_zero_volume():
+    result = WaterVolumeService.estimate(10_000.0, 0.0, "p")
+    assert result.theoretical_runoff_m3 == 0.0
+    assert result.expected_collectible_water_m3 == 0.0
+
+
+def test_invalid_inputs_rejected():
+    with pytest.raises(HTTPException) as area_exc:
+        WaterVolumeService.estimate(0.0, 100.0, "p")
+    assert area_exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    with pytest.raises(HTTPException):
+        WaterVolumeService.estimate(1000.0, -5.0, "p")
+
+    with pytest.raises(HTTPException):
+        WaterVolumeService.estimate(1000.0, 100.0, "p", runoff_coefficient=1.5)
+
+    with pytest.raises(HTTPException):
+        WaterVolumeService.estimate(1000.0, 100.0, "p", collection_efficiency=-0.1)
+
+
+# --- Phase 7: pond storage ---------------------------------------------------------------
+
+
+def test_storage_capacity_matches_inflow():
+    result = PondStorageService.suggest_pond_storage(1500.0)
+    assert result.storage_capacity_m3 == pytest.approx(1500.0, rel=0.01)
+    assert result.design_inflow_m3 == 1500.0
+    assert result.depth_m == 3.0
+    assert result.top_width_m > result.bottom_width_m
+    assert result.surface_area_m2 == pytest.approx(result.top_width_m * result.top_length_m, rel=0.01)
+    assert "not a substitute" in result.note.lower()
+
+
+def test_storage_scales_monotonically_with_inflow():
+    small = PondStorageService.suggest_pond_storage(500.0)
+    large = PondStorageService.suggest_pond_storage(5000.0)
+    assert large.bottom_width_m > small.bottom_width_m
+    assert large.storage_capacity_m3 > small.storage_capacity_m3
+
+
+def test_storage_depth_override():
+    result = PondStorageService.suggest_pond_storage(1000.0, max_depth_m=1.5)
+    assert result.depth_m == 1.5
+    assert result.storage_capacity_m3 == pytest.approx(1000.0, rel=0.01)
+    # Shallower basin needs a larger footprint.
+    deep = PondStorageService.suggest_pond_storage(1000.0, max_depth_m=3.0)
+    assert result.surface_area_m2 > deep.surface_area_m2
+
+
+def test_storage_invalid_inputs_rejected():
+    with pytest.raises(HTTPException):
+        PondStorageService.suggest_pond_storage(0.0)
+    with pytest.raises(HTTPException):
+        PondStorageService.suggest_pond_storage(100.0, max_depth_m=50.0)
+    with pytest.raises(HTTPException):
+        PondStorageService.suggest_pond_storage(100.0, side_slope_hv=-1.0)
+````
+
 ## File: .dockerignore
 ````
 __pycache__
@@ -49175,82 +52418,6 @@ venv
 .gitignore
 report.pdf
 tests
-````
-
-## File: .env.example
-````
-PROJECT_NAME="Village Pond Planning System"
-API_V1_STR="/api/v1"
-DEBUG=False
-HOST="0.0.0.0"
-PORT=8000
-````
-
-## File: .gitignore
-````
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual Environments
-venv/
-.venv/
-ENV/
-env/
-env.bak/
-venv.bak/
-
-# Environment variables
-.env
-.env.local
-.env.*.local
-
-# Testing and Coverage
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-coverage.xml
-*.cover
-*.py,cover
-
-# IDE and Editors
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Operating System Files
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Temporary data and logs
-*.log
-tmp/
-temp/
 ````
 
 ## File: .python-version
@@ -98217,6 +101384,722 @@ EXPOSE 8000
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 ````
 
+## File: prompt.txt
+````
+We are building an AI-based Village Pond Planning System.
+
+IMPORTANT:
+The repository already contains an implemented contour-analysis backend for KML/KMZ files. DO NOT rewrite or unnecessarily replace the existing contour parsing, terrain reconstruction, hydrology, candidate-selection, or catchment logic.
+
+First inspect the existing repository and understand the current architecture and APIs.
+
+The current contour-analysis subsystem already aims to:
+
+KML/KMZ
+→ contour parsing
+→ terrain/DEM reconstruction
+→ slope analysis
+→ pond candidate selection
+→ D8 flow/hydrology
+→ catchment delineation
+→ catchment area
+→ structured API response
+
+Your task now is to implement the NEXT PART of the system: extend the current backend into the complete pond-planning workflow described below.
+
+==================================================
+FINAL SYSTEM REQUIREMENTS
+==================================================
+
+The final application must provide:
+
+1. A fully working frontend.
+2. An option for the user to select a land area on an interactive map.
+3. Generation of pond-planning results based on the selected land area.
+4. Results must include:
+   - Suggested pond location
+   - Catchment area
+   - Expected water volume that can be collected
+5. The pond location, catchment area, and expected water volume must be visualized/overlaid on the map.
+6. The system should be fast and functional and should consider stress, scaling, memory, CPU, request size, and the limitations of the available deployment systems.
+
+==================================================
+IMPLEMENTATION STRATEGY
+==================================================
+
+Implement this in phases.
+
+Do NOT attempt to build everything as one giant change.
+
+After each phase:
+- run the existing tests
+- add appropriate tests
+- verify the API manually
+- preserve backwards compatibility where reasonable
+- keep the code modular
+
+==================================================
+PHASE 1 — LAND-AREA SELECTION
+==================================================
+
+Introduce a backend representation for the user-selected land area.
+
+The frontend should allow the user to draw/select an area on the map.
+
+The selected area should be sent to the backend as GeoJSON.
+
+Support at minimum:
+
+- Polygon
+- MultiPolygon if practical
+
+Example request conceptually:
+
+POST /analyzeLand
+
+{
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [...]
+    }
+}
+
+The backend should validate:
+
+- valid GeoJSON
+- valid polygon geometry
+- non-zero area
+- reasonable coordinate ranges
+- valid/reasonable geographic extent
+
+Calculate and return:
+
+- selected area in m²
+- selected area in hectares
+- bounding box
+- centroid
+
+Do not hard-code any location.
+
+The selected land polygon must become the spatial constraint for all subsequent analysis.
+
+==================================================
+PHASE 2 — CONNECT SELECTED LAND WITH TERRAIN ANALYSIS
+==================================================
+
+Modify the existing terrain/catchment pipeline so that analysis can be restricted to the selected land area.
+
+The workflow should become approximately:
+
+User-selected polygon
+        ↓
+Determine terrain/contour coverage
+        ↓
+Clip/mask terrain to selected area
+        ↓
+DEM
+        ↓
+Slope
+        ↓
+Hydrology
+        ↓
+Candidate pond locations
+        ↓
+Catchment analysis
+
+The selected polygon must NOT simply be ignored after being received.
+
+If the current KML contour map is used as the terrain source, determine how the selected polygon relates spatially to the contour map.
+
+Return a meaningful error if:
+
+- the selected land does not overlap the available terrain data
+- there are insufficient contour/elevation points
+- terrain reconstruction is not possible
+
+==================================================
+PHASE 3 — POND LOCATION GENERATION
+==================================================
+
+Use the existing candidate-selection and hydrology pipeline, but make it operate within the selected land area.
+
+The candidate generation should consider terrain characteristics rather than hard-coded coordinates.
+
+At minimum consider:
+
+- elevation
+- slope
+- flow accumulation
+- drainage convergence / hydrological connectivity
+- location inside the selected land area
+
+Avoid selecting a candidate simply because it is the lowest elevation point.
+
+A candidate should preferably be associated with a location where water can naturally accumulate or where meaningful upstream flow contributes.
+
+Generate one primary suggested pond location.
+
+Optionally retain several ranked candidates internally for future expansion.
+
+The response should include:
+
+- latitude
+- longitude
+- elevation
+- slope
+- suitability score
+- relevant hydrological metrics
+
+All candidate coordinates MUST be derived from the input terrain and selected land.
+
+==================================================
+PHASE 4 — CATCHMENT DELINEATION
+==================================================
+
+Use the existing hydrology implementation where possible.
+
+For the selected pond location:
+
+1. Determine the hydrological outlet/pour point.
+2. Determine upstream contributing cells.
+3. Generate the catchment boundary.
+4. Calculate catchment area.
+
+Return:
+
+- catchment area in m²
+- catchment area in hectares
+- catchment polygon as GeoJSON
+- contributing cell count
+- pond/outlet coordinates
+
+The catchment polygon must be suitable for direct visualization on a frontend map.
+
+Do not return only raster/grid coordinates.
+
+==================================================
+PHASE 5 — RAINFALL DATA
+==================================================
+
+Add rainfall as a separate service/module.
+
+The system must be capable of obtaining rainfall information for the analyzed location.
+
+You are FREE TO USE APPROPRIATE PUBLIC INTERNET RESOURCES/APIs for calculations and data acquisition where permitted.
+
+Research suitable publicly available rainfall/elevation/geospatial APIs if required.
+
+Potential sources can include APIs such as:
+
+- NASA POWER
+- Open-Meteo
+- IMD where publicly accessible
+- other reliable public geospatial/rainfall sources
+
+Do NOT blindly choose an API.
+
+Evaluate:
+
+- availability
+- API limits
+- historical coverage
+- spatial resolution
+- response latency
+- reliability
+- whether an API key is required
+- suitability for this project
+
+Keep the external API behind a service abstraction so it can be replaced later.
+
+For rainfall, obtain an appropriate historical rainfall statistic for the catchment/pond location.
+
+The response should clearly state:
+
+- rainfall period
+- rainfall amount
+- units
+- source/provider
+- timestamp/data period where applicable
+
+Cache rainfall responses when appropriate.
+
+Do not call an external rainfall API repeatedly for identical locations unnecessarily.
+
+==================================================
+PHASE 6 — EXPECTED WATER VOLUME
+==================================================
+
+Implement a transparent and explainable runoff/water-volume estimation model.
+
+At minimum the calculation should use:
+
+- catchment area
+- rainfall
+- an explicit runoff coefficient or equivalent runoff assumption
+
+A basic conceptual model may be:
+
+Runoff Volume =
+Catchment Area × Rainfall Depth × Runoff Coefficient
+
+Ensure units are consistent.
+
+For example:
+
+area in m²
+rainfall in metres
+volume in m³
+
+The runoff coefficient must NOT be hidden.
+
+Return:
+
+- catchment area
+- rainfall
+- runoff coefficient
+- estimated runoff volume
+- expected collectible water volume
+
+Clearly distinguish:
+
+"theoretical runoff"
+
+from
+
+"expected collectible water"
+
+if additional efficiency/loss factors are applied.
+
+Use documented assumptions.
+
+If appropriate, expose these assumptions in the API response so that the frontend can explain how the result was obtained.
+
+You are free to research standard hydrological calculation approaches and publicly available references using the internet.
+
+Do not invent scientific constants or formulas without documenting their origin/assumption.
+
+==================================================
+PHASE 7 — POND STORAGE ESTIMATION
+==================================================
+
+The current immediate requirement is expected water volume, but structure the system so that pond storage can later be calculated.
+
+Create a clean abstraction for:
+
+- estimated inflow/runoff volume
+- pond storage capacity
+- pond depth
+- pond dimensions
+
+Do NOT over-engineer this phase.
+
+The immediate output should primarily be:
+
+expected collectible water volume.
+
+If a storage estimate is implemented, clearly distinguish it from runoff volume.
+
+==================================================
+PHASE 8 — UNIFIED ANALYSIS API
+==================================================
+
+Create a clean API that combines the complete workflow.
+
+For example:
+
+POST /analyzeLand
+
+or
+
+POST /analyzePondSite
+
+Input:
+
+- selected land GeoJSON
+- terrain/contour source or reference to the uploaded contour map
+- optional analysis parameters
+
+The API should execute:
+
+Selected land
+    ↓
+Terrain extraction
+    ↓
+DEM
+    ↓
+Slope
+    ↓
+Hydrology
+    ↓
+Pond candidate
+    ↓
+Catchment
+    ↓
+Rainfall
+    ↓
+Runoff estimation
+    ↓
+Expected collectible water
+
+Return a structured response similar to:
+
+{
+    "status": "success",
+
+    "selected_land": {
+        "area_m2": ...,
+        "area_hectares": ...,
+        "geometry": {...}
+    },
+
+    "pond": {
+        "latitude": ...,
+        "longitude": ...,
+        "elevation_m": ...,
+        "slope_deg": ...,
+        "suitability_score": ...
+    },
+
+    "catchment": {
+        "area_m2": ...,
+        "area_hectares": ...,
+        "geometry": {...}
+    },
+
+    "rainfall": {
+        "period": "...",
+        "rainfall_mm": ...,
+        "source": "..."
+    },
+
+    "water": {
+        "runoff_coefficient": ...,
+        "estimated_runoff_m3": ...,
+        "expected_collectible_water_m3": ...
+    }
+}
+
+Use the project's existing Pydantic schema architecture instead of returning unvalidated dictionaries everywhere.
+
+==================================================
+PHASE 9 — FRONTEND MAP
+==================================================
+
+Build a functional frontend around the backend APIs.
+
+The frontend must provide:
+
+1. Interactive map.
+2. Ability to select/draw land area.
+3. Ability to submit the selected area for analysis.
+4. Loading/progress state.
+5. Results panel.
+6. Map overlays.
+
+The map should visualize:
+
+- selected land polygon
+- suggested pond location
+- catchment boundary
+- expected water volume information
+
+Use an appropriate map library.
+
+Possible choices include:
+
+- Leaflet
+- React-Leaflet
+- MapLibre
+- another suitable lightweight mapping solution
+
+Choose based on the existing repository/frontend architecture rather than introducing unnecessary dependencies.
+
+==================================================
+PHASE 10 — RESULT VISUALIZATION
+==================================================
+
+When analysis finishes, display:
+
+Pond Location:
+    latitude
+    longitude
+
+Catchment:
+    area in hectares / m²
+
+Water:
+    expected collectible volume in m³
+
+Rainfall:
+    rainfall amount + period + source
+
+On the map:
+
+- selected land → polygon
+- catchment → polygon overlay
+- pond → marker
+
+The user should be able to visually understand the relationship:
+
+selected land
+       ↓
+catchment
+       ↓
+pond location
+
+Do not make the frontend responsible for hydrological calculations.
+
+All calculations must happen in the backend.
+
+==================================================
+PHASE 11 — PERFORMANCE / SCALING
+==================================================
+
+The system needs to remain usable under realistic stress.
+
+Analyze and address:
+
+- very large KML/KMZ files
+- excessive contour points
+- very large DEM grids
+- expensive interpolation
+- repeated rainfall API requests
+- concurrent analysis requests
+- memory consumption
+- CPU-heavy hydrology calculations
+
+Implement reasonable safeguards such as:
+
+- upload size limits
+- maximum contour/vertex limits
+- DEM resolution limits
+- maximum raster dimensions
+- request validation
+- timeouts for external APIs
+- caching
+- graceful error handling
+
+Do NOT prematurely introduce distributed infrastructure unless actually necessary.
+
+Prefer simple optimizations first.
+
+For example:
+
+- spatially reduce unnecessary contour points
+- avoid repeatedly reconstructing the same terrain
+- cache rainfall requests
+- avoid unnecessary raster resolution
+- reuse intermediate calculations where safe
+
+==================================================
+PHASE 12 — TESTING
+==================================================
+
+Add tests for:
+
+INPUT:
+
+- valid KML
+- valid KMZ
+- invalid contour file
+- invalid GeoJSON
+- polygon outside terrain
+- empty polygon
+- extremely large input
+
+TERRAIN:
+
+- DEM generation
+- elevation range
+- slope generation
+
+HYDROLOGY:
+
+- flow direction
+- flow accumulation
+- catchment delineation
+- catchment area
+
+POND:
+
+- candidate generation
+- candidate constrained to selected land
+- candidate derived dynamically
+
+RAINFALL:
+
+- API response parsing
+- API failure
+- timeout
+- caching
+
+WATER:
+
+- unit conversion
+- runoff calculation
+- expected collectible volume
+
+API:
+
+- successful complete analysis
+- validation errors
+- graceful failures
+
+FRONTEND:
+
+- map loads
+- polygon selection
+- analysis request
+- result rendering
+- map overlays
+
+==================================================
+PHASE 13 — DEMONSTRATION
+==================================================
+
+Use the provided sample contour map to demonstrate the system.
+
+However:
+
+ABSOLUTELY NO SAMPLE-SPECIFIC HARD-CODING.
+
+Do NOT hard-code:
+
+- latitude
+- longitude
+- pond location
+- catchment polygon
+- catchment area
+- rainfall
+- water volume
+- elevation
+- candidate cell
+
+Everything must be derived from the input.
+
+The sample should only be used as test data.
+
+==================================================
+IMPORTANT ENGINEERING RULES
+==================================================
+
+1. First inspect the entire existing repository before modifying it.
+
+2. Reuse existing services and schemas wherever possible.
+
+3. Do not duplicate existing contour/hydrology implementations.
+
+4. Do not rewrite working code without a concrete reason.
+
+5. Keep responsibilities separated:
+
+parser
+terrain
+hydrology
+candidate selection
+catchment
+rainfall
+water estimation
+API
+frontend
+
+6. Keep calculations deterministic where possible.
+
+7. Every scientific/hydrological assumption must be documented.
+
+8. You are explicitly allowed to research calculations, algorithms, APIs, standards, and geospatial/hydrological methods from reliable internet resources when needed.
+
+9. Prefer authoritative sources, official API documentation, scientific references, and established geospatial libraries.
+
+10. If an external API is used, isolate it behind a service interface.
+
+11. Do not make the system dependent on a single external API when a reasonable fallback is possible.
+
+12. Do not introduce an ML model unless there is a clear technical reason. A deterministic terrain/hydrology approach is preferable for this requirement.
+
+13. Do not over-engineer.
+
+14. Keep the system explainable because the project must be demonstrated and the implementation decisions must be explainable.
+
+15. Update README/API documentation with:
+    - API endpoints
+    - request examples
+    - response examples
+    - calculation methodology
+    - assumptions
+    - external APIs/data sources
+    - setup instructions
+
+==================================================
+DEFINITION OF DONE
+==================================================
+
+The implementation is considered successful when:
+
+A user can:
+
+1. Open the frontend.
+2. See an interactive map.
+3. Select/draw a land area.
+4. Submit the selected area.
+5. Backend analyzes the terrain.
+6. Backend identifies a suitable pond location.
+7. Backend determines the contributing catchment.
+8. Backend calculates catchment area.
+9. Backend obtains appropriate rainfall information.
+10. Backend estimates expected collectible water volume.
+11. Frontend displays:
+       - selected land
+       - pond location
+       - catchment polygon
+       - expected water volume
+12. The entire workflow works using dynamically derived values.
+13. No coordinates/results are hard-coded for the sample.
+14. Existing tests continue to pass.
+15. New functionality has appropriate tests.
+16. The implementation remains reasonably fast and memory-conscious.
+
+Before making changes, inspect the current repository and provide a short implementation assessment identifying:
+- what already exists
+- what can be reused
+- what needs modification
+- what new modules/routes/components are required
+
+Then implement the work phase-by-phase rather than making one uncontrolled rewrite.
+
+
+
+One important thing I'd emphasize to the coding agent
+
+For water volume, don't let it simply do:
+
+catchment area × rainfall
+
+and call that the answer.
+
+The backend should expose the assumptions:
+
+Catchment Area
+      ×
+Rainfall Depth
+      ×
+Runoff Coefficient
+      ×
+Collection Efficiency
+      =
+Expected Collectible Water
+
+That makes the result much easier to defend during your demo, especially because the assignment explicitly expects rainfall information, runoff estimation, and storage-related calculations.
+
+Also, your existing codebase already has a fairly clear service separation and API structure, so the agent should extend that architecture rather than flattening everything into one endpoint.
+
+The best immediate implementation target after your current contour work is therefore:
+
+Map selection → selected polygon → terrain constrained to polygon → pond candidate → catchment → rainfall → water volume → GeoJSON/result response → frontend visualization.
+
+That gives you the complete end-to-end backbone required by the final assignment without prematurely adding unrelated features.
+````
+
 ## File: render.yaml
 ````yaml
 services:
@@ -98236,6 +102119,1431 @@ services:
         value: /api/v1
       - key: DEBUG
         value: false
+````
+
+## File: .commandcode/taste/taste.md
+````markdown
+# Taste
+See [taste/taste.md](taste/taste.md)
+````
+
+## File: app/api/v1/endpoints/terrain.py
+````python
+from fastapi import APIRouter
+import shapely
+from shapely.geometry import shape as shape_from_geojson
+
+from app.core.config import settings
+from app.schemas.catchment import ProjectedBounds
+from app.schemas.terrain import (
+    DEMPreviewInfo,
+    PondSitingResult,
+    TerrainAnalysisInfo,
+    TerrainPreviewRequest,
+    TerrainPreviewResponse,
+)
+from app.services.candidate_selection import CandidateSelectionService
+from app.services.contours import (
+    DEFAULT_CONTOUR_INTERVAL_M,
+    ContourGenerationService,
+)
+from app.services.dem import DEMService
+from app.services.hydrology import HydrologyService
+from app.services.land import LandSelectionService
+from app.services.terrain import TerrainService
+
+router = APIRouter()
+
+
+@router.post(
+    "/terrainPreview",
+    response_model=TerrainPreviewResponse,
+    summary="Acquire DEM for the area around a selected land polygon",
+    description=(
+        "Diagnostic/preview endpoint for the automatic terrain-acquisition path. Validates the "
+        "selected land geometry, expands its bounding box by a documented buffer to define the "
+        "hydrological analysis extent (the catchment may extend beyond the selected land), and "
+        "acquires a DEM for that extent from the configured public DEM provider (AWS Terrain "
+        "Tiles by default, OpenTopography when an API key is configured). Results are cached by "
+        "geographic extent. The KML/KMZ upload path remains fully supported independently."
+    ),
+)
+async def terrain_preview(request: TerrainPreviewRequest) -> TerrainPreviewResponse:
+    selected_land = LandSelectionService.validate_and_measure(request.geometry)
+    buffer_meters = (
+        request.buffer_meters
+        if request.buffer_meters is not None
+        else settings.ANALYSIS_BUFFER_METERS
+    )
+    resolution = request.resolution_meters
+
+    analysis_extent = DEMService.compute_analysis_extent(
+        selected_land.bounding_box, buffer_meters
+    )
+    dem = DEMService.acquire_dem(analysis_extent, target_resolution_m=resolution)
+
+    # Phase 2B: the acquired DEM is a first-class terrain input — derive terrain
+    # metrics and (optionally) visualization contours directly from it.
+    terrain_model = TerrainService.reconstruct_terrain_from_dem(dem)
+    contours = None
+    if request.include_contours:
+        interval = (
+            request.contour_interval_m
+            if request.contour_interval_m is not None
+            else DEFAULT_CONTOUR_INTERVAL_M
+        )
+        contours = ContourGenerationService.generate_contours(terrain_model, interval)
+
+    # Phases 3-4: candidate siting constrained to the selected land, catchment free
+    # to extend beyond it. Flow grids are computed once and shared.
+    pond_siting = None
+    if request.include_analysis:
+        land_polygon = shape_from_geojson(selected_land.geometry)
+        land_mask = TerrainService.mask_cells_within_polygon(terrain_model, land_polygon)
+        filled_dem = HydrologyService.condition_dem(terrain_model.elevation_grid)
+        flow_dir = HydrologyService.calculate_flow_direction(
+            filled_dem, terrain_model.grid_resolution_meters
+        )
+        flow_acc = HydrologyService.calculate_flow_accumulation(flow_dir, filled_dem)
+
+        config = CandidateSelectionService.FLOW_WEIGHTED_CONFIG
+        candidates = CandidateSelectionService.identify_candidates(
+            terrain_model,
+            config=config,
+            flow_accumulation=flow_acc,
+            candidate_mask=land_mask,
+        )
+        selected_pond = candidates[0] if candidates else None
+        catchment = None
+        if selected_pond is not None:
+            catchment = HydrologyService.analyze_hydrology(
+                terrain_model,
+                selected_pond,
+                conditioned_dem=filled_dem,
+                flow_direction=flow_dir,
+                flow_accumulation=flow_acc,
+            )
+        pond_siting = PondSitingResult(
+            candidate_sites=candidates,
+            selected_pond=selected_pond,
+            scoring_config={
+                "slope_weight": config.slope_weight,
+                "elevation_weight": config.elevation_weight,
+                "flow_weight": config.flow_weight,
+                "ideal_slope_deg": config.ideal_slope_deg,
+                "max_acceptable_slope_deg": config.max_acceptable_slope_deg,
+                "min_distance_meters": config.min_distance_meters,
+            },
+            land_masked_cell_count=int(land_mask.sum()),
+            catchment=catchment,
+        )
+
+    return TerrainPreviewResponse(
+        status="success",
+        analysis_extent=analysis_extent,
+        buffer_meters=buffer_meters,
+        target_resolution_meters=dem.resolution_meters,
+        dem=DEMPreviewInfo(
+            crs=dem.crs,
+            resolution_meters=dem.resolution_meters,
+            rows=dem.rows,
+            cols=dem.cols,
+            min_elevation_m=round(float(dem.elevation_grid.min()), 2),
+            max_elevation_m=round(float(dem.elevation_grid.max()), 2),
+            mean_elevation_m=round(float(dem.elevation_grid.mean()), 2),
+            nodata_cells_filled=dem.nodata_cells_filled,
+            projected_bounds=ProjectedBounds(
+                min_x=dem.bounds[0],
+                max_x=dem.bounds[1],
+                min_y=dem.bounds[2],
+                max_y=dem.bounds[3],
+            ),
+            geographic_extent=dem.geographic_extent,
+            source={
+                "provider": dem.source.provider,
+                "dataset": dem.source.dataset,
+                "attribution": dem.source.attribution,
+                "zoom_level": dem.source.zoom_level,
+            },
+            cache_hit=dem.cache_hit,
+        ),
+        terrain=TerrainAnalysisInfo(
+            terrain=terrain_model.to_metadata(),
+            contours=contours,
+        ),
+        pond_siting=pond_siting,
+        message=(
+            "DEM acquired for the buffered analysis extent; terrain metrics and contours "
+            "derived from it. The KML/KMZ upload path remains available."
+        ),
+    )
+````
+
+## File: app/schemas/terrain.py
+````python
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
+
+from app.schemas.catchment import (
+    CatchmentResult,
+    GeographicExtent,
+    PondCandidateSite,
+    ProjectedBounds,
+    TerrainMetadata,
+)
+from app.schemas.land import LandGeometry
+
+
+class TerrainPreviewRequest(BaseModel):
+    """Selected land area plus optional terrain-acquisition parameters."""
+
+    geometry: LandGeometry
+    buffer_meters: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=5000.0,
+        description="Buffer added around the land bbox to define the analysis extent. Defaults to ANALYSIS_BUFFER_METERS.",
+    )
+    resolution_meters: Optional[float] = Field(
+        default=None,
+        ge=10.0,
+        le=100.0,
+        description="Target DEM grid resolution in meters. Defaults to DEM_TARGET_RESOLUTION_M.",
+    )
+    contour_interval_m: Optional[float] = Field(
+        default=None,
+        ge=1.0,
+        le=100.0,
+        description="Contour interval in meters for generated visualization contours. Defaults to 5 m.",
+    )
+    include_contours: bool = Field(
+        default=True,
+        description="Include DEM-derived contour lines (GeoJSON LineStrings) for map visualization.",
+    )
+    include_analysis: bool = Field(
+        default=False,
+        description=(
+            "Also run candidate pond siting (constrained to the selected land) and catchment "
+            "delineation on the acquired DEM."
+        ),
+    )
+
+
+class DEMSourceInfo(BaseModel):
+    provider: str
+    dataset: str
+    attribution: str
+    zoom_level: Optional[int] = None
+
+
+class DEMPreviewInfo(BaseModel):
+    crs: str
+    resolution_meters: float
+    rows: int
+    cols: int
+    min_elevation_m: float
+    max_elevation_m: float
+    mean_elevation_m: float
+    nodata_cells_filled: int
+    projected_bounds: ProjectedBounds
+    geographic_extent: GeographicExtent
+    source: DEMSourceInfo
+    cache_hit: bool
+
+
+class TerrainAnalysisInfo(BaseModel):
+    """Terrain-level analysis derived from the acquired DEM (Phase 2B)."""
+
+    terrain: TerrainMetadata
+    contours: Optional[Dict[str, Any]] = None
+
+
+class PondSitingResult(BaseModel):
+    """Candidate pond sites and catchment computed on the DEM path (Phases 3-4).
+
+    Candidates are constrained to the selected land polygon; the catchment feeding
+    the primary candidate may extend beyond the selected land.
+    """
+
+    candidate_sites: List[PondCandidateSite] = Field(default_factory=list)
+    selected_pond: Optional[PondCandidateSite] = None
+    scoring_config: Dict[str, float] = Field(default_factory=dict)
+    land_masked_cell_count: int = 0
+    catchment: Optional[CatchmentResult] = None
+
+
+class TerrainPreviewResponse(BaseModel):
+    status: str = "success"
+    analysis_extent: GeographicExtent
+    buffer_meters: float
+    target_resolution_meters: float
+    dem: DEMPreviewInfo
+    terrain: Optional[TerrainAnalysisInfo] = None
+    pond_siting: Optional[PondSitingResult] = None
+    message: str
+````
+
+## File: app/services/dem.py
+````python
+"""Automatic DEM acquisition service.
+
+Acquires elevation data for an analysis extent (the selected land bbox expanded by a
+documented buffer) from public DEM sources, without requiring the user to upload a
+contour file.
+
+Provider evaluation (documented decision):
+
+- AWS Terrain Tiles (Mapzen/Tilezen "terrarium", s3://elevation-tiles-prod) — DEFAULT.
+  Global coverage, no API key (public AWS Open Data bucket), slippy z/x/y PNG tiles
+  (zoom 0-15), decode: elevation_m = R*256 + G + B/256 - 32768. Fast S3 delivery and
+  stable long-term hosting make it suitable for zero-configuration deployments.
+  Underlying sources include SRTM (courtesy USGS/NASA), GMTED2010, ETOPO1 and regional
+  LiDAR composites (see attribution below).
+
+- OpenTopography Global DEM API — OPTIONAL fallback (requires a free API key, rate
+  limited to ~50 calls/24h for non-academic users). Used only when
+  OPEN_TOPOGRAPHY_API_KEY is configured, requested as AAIGrid (plain-text ArcInfo
+  ASCII Grid) so no GDAL/rasterio dependency is needed.
+
+The provider is isolated behind the DEMProvider abstraction and can be replaced by
+adding another subclass. Elevation data is cached (memory LRU + disk NPZ) with a
+deterministic cache key derived from provider, dataset, geographic extent and
+resolution, so identical areas are never re-downloaded.
+"""
+
+import hashlib
+import io
+import json
+import math
+from collections import OrderedDict
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import httpx
+import numpy as np
+from PIL import Image
+from pyproj import Transformer
+from scipy.ndimage import distance_transform_edt
+from fastapi import HTTPException, status
+
+from app.core.config import settings
+from app.schemas.catchment import GeographicExtent
+from app.services.terrain import DEMData, DEMSourceInfo, TerrainService
+
+# --- Documented constants -------------------------------------------------------------
+
+TERRARIUM_OFFSET = 32768.0  # terrarium PNG encoding offset (meters)
+TERRARIUM_NODATA_MAX = -32000.0  # values at/below this are voids (ocean is 0.0)
+
+WEB_MERCATOR_LAT_LIMIT_DEG = 85.0511  # Web Mercator latitude bounds
+WEB_MERCATOR_HALF_WORLD_M = 20037508.342789244
+
+# Ground resolution (m/pixel) of zoom-0 Web Mercator tiles at the equator.
+ZOOM0_METERS_PER_PIXEL = 156543.03392
+
+# Required attribution for tile sources used by the AWS Terrain Tiles dataset
+# (https://github.com/tilezen/joerd/blob/master/docs/attribution.md).
+AWS_TERRAIN_ATTRIBUTION = (
+    "Terrain tiles: Mapzen/AWS Open Data. Global SRTM data courtesy of the "
+    "U.S. Geological Survey; GMTED2010 courtesy of USGS; ETOPO1 courtesy of NOAA; "
+    "regional sources per Mapzen attribution requirements."
+)
+
+OPEN_TOPOGRAPHY_ATTRIBUTION = (
+    "DEM via the OpenTopography API (https://opentopography.org). "
+    "SRTM data courtesy of the U.S. Geological Survey."
+)
+
+OPEN_TOPOGRAPHY_GLOBALDEM_URL = "https://portal.opentopography.org/API/globaldem"
+
+# Approximate ground cell size (degrees) per OpenTopography dataset, used to pad
+# request bboxes so bilinear sampling always has neighbouring cells.
+OT_DATASET_CELL_DEG = {
+    "SRTMGL1": 1.0 / 3600.0,
+    "SRTMGL3": 3.0 / 3600.0,
+    "AW3D30": 1.0 / 3600.0,
+    "NASADEM": 1.0 / 3600.0,
+    "Copernicus_GLO30": 1.0 / 3600.0,
+    "Copernicus_GLO90": 3.0 / 3600.0,
+}
+OT_DEFAULT_CELL_DEG = 1.0 / 3600.0
+
+# Elevation sanity bounds (meters) applied after acquisition.
+MIN_PLAUSIBLE_ELEVATION_M = -500.0
+MAX_PLAUSIBLE_ELEVATION_M = 9000.0
+
+# Maximum fraction of void cells tolerated before the area is rejected.
+MAX_NODATA_FRACTION = 0.5
+
+_MEMORY_CACHE_MAX_ENTRIES = 4
+
+
+# --- Shared bilinear sampler -----------------------------------------------------------
+
+
+def bilinear_sample(grid: np.ndarray, fy: np.ndarray, fx: np.ndarray) -> np.ndarray:
+    """Bilinearly sample `grid` at fractional (row, col) coordinates.
+
+    `fy` and `fx` are 1-D arrays of N coordinates; the result is a 1-D array of N
+    elevations. Out-of-range coordinates are clamped to the grid edge (nearest
+    continuation).
+    """
+    rows, cols = grid.shape
+    fy = np.clip(np.asarray(fy, dtype=np.float64), 0.0, max(0.0, rows - 1.0))
+    fx = np.clip(np.asarray(fx, dtype=np.float64), 0.0, max(0.0, cols - 1.0))
+    y0 = np.floor(fy).astype(np.int64)
+    x0 = np.floor(fx).astype(np.int64)
+    y1 = np.minimum(y0 + 1, rows - 1)
+    x1 = np.minimum(x0 + 1, cols - 1)
+    wy = (fy - y0)[:, None]
+    wx = (fx - x0)[:, None]
+    g00 = grid[y0, x0][:, None]
+    g01 = grid[y0, x1][:, None]
+    g10 = grid[y1, x0][:, None]
+    g11 = grid[y1, x1][:, None]
+    top = g00 * (1.0 - wx) + g01 * wx
+    bottom = g10 * (1.0 - wx) + g11 * wx
+    return (top * (1.0 - wy) + bottom * wy)[:, 0].astype(np.float32)
+
+
+# --- Providers -------------------------------------------------------------------------
+
+
+class DEMProvider:
+    """Abstract DEM source. Implementations fetch their native raster and expose
+    `sample(lon, lat)` for bilinear elevation queries in WGS84 degrees."""
+
+    name: str = "abstract"
+    dataset: str = "abstract"
+    attribution: str = ""
+
+    def sample(self, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
+        raise NotImplementedError
+
+
+class AWSTerrainTilesProvider(DEMProvider):
+    """Mapzen/Tilezen terrarium tiles from the public AWS Open Data bucket."""
+
+    name = "aws_terrain_tiles"
+    dataset = "terrarium"
+    attribution = AWS_TERRAIN_ATTRIBUTION
+
+    def __init__(self, timeout_s: int, max_tiles: int):
+        self.timeout_s = timeout_s
+        self.max_tiles = max_tiles
+        self.zoom_used: Optional[int] = None
+
+    def _select_zoom(self, target_resolution_m: float, lat_deg: float) -> int:
+        mpp_at_lat = ZOOM0_METERS_PER_PIXEL * math.cos(math.radians(lat_deg))
+        for zoom in range(0, 16):
+            if mpp_at_lat / (2**zoom) <= target_resolution_m:
+                return zoom
+        return 15
+
+    def _tile_range(
+        self, extent: GeographicExtent, zoom: int
+    ) -> Tuple[int, int, int, int]:
+        n = 2**zoom
+        x0 = int(math.floor((extent.min_longitude + 180.0) / 360.0 * n))
+        x1 = int(math.floor((extent.max_longitude + 180.0) / 360.0 * n))
+        lat_min = max(-WEB_MERCATOR_LAT_LIMIT_DEG, extent.min_latitude)
+        lat_max = min(WEB_MERCATOR_LAT_LIMIT_DEG, extent.max_latitude)
+        y0 = int(
+            math.floor(
+                (1.0 - math.asinh(math.tan(math.radians(lat_max))) / math.pi) / 2.0 * n
+            )
+        )
+        y1 = int(
+            math.floor(
+                (1.0 - math.asinh(math.tan(math.radians(lat_min))) / math.pi) / 2.0 * n
+            )
+        )
+        return max(0, x0), min(n - 1, x1), max(0, y0), min(n - 1, y1)
+
+    def _fetch_mosaic(
+        self, extent: GeographicExtent, zoom: int
+    ) -> Tuple[np.ndarray, int, int]:
+        tx0, tx1, ty0, ty1 = self._tile_range(extent, zoom)
+        n_tiles_x = tx1 - tx0 + 1
+        n_tiles_y = ty1 - ty0 + 1
+        if n_tiles_x * n_tiles_y > self.max_tiles:
+            raise ValueError("tile_limit")
+
+        mosaic = np.full((n_tiles_y * 256, n_tiles_x * 256), TERRARIUM_NODATA_MAX, dtype=np.float32)
+        base_url = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium"
+        with httpx.Client(timeout=httpx.Timeout(10.0, read=float(self.timeout_s))) as client:
+            for ty in range(ty0, ty1 + 1):
+                for tx in range(tx0, tx1 + 1):
+                    url = f"{base_url}/{zoom}/{tx}/{ty}.png"
+                    try:
+                        response = client.get(url)
+                        response.raise_for_status()
+                    except httpx.HTTPError as exc:
+                        raise HTTPException(
+                            status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"DEM tile request failed ({self.name}, {url}): {exc}",
+                        )
+                    png_bytes = response.content
+                    if len(png_bytes) > 10 * 1024 * 1024:
+                        raise HTTPException(
+                            status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"DEM tile exceeds the maximum accepted size ({url}).",
+                        )
+                    try:
+                        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+                    except Exception as exc:
+                        raise HTTPException(
+                            status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"DEM tile is not a valid PNG ({url}): {exc}",
+                        )
+                    arr = np.asarray(img, dtype=np.float32)
+                    elev = (
+                        arr[:, :, 0] * 256.0
+                        + arr[:, :, 1]
+                        + arr[:, :, 2] / 256.0
+                        - TERRARIUM_OFFSET
+                    )
+                    row = ty - ty0
+                    col = tx - tx0
+                    mosaic[row * 256 : (row + 1) * 256, col * 256 : (col + 1) * 256] = elev
+        return mosaic, tx0, ty0
+
+    def sample(self, extent: GeographicExtent, lon: np.ndarray, lat: np.ndarray, target_resolution_m: float) -> np.ndarray:
+        if (
+            lat.min() < -WEB_MERCATOR_LAT_LIMIT_DEG
+            or lat.max() > WEB_MERCATOR_LAT_LIMIT_DEG
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Selected area lies outside Web Mercator coverage (polar regions are not supported by this DEM source).",
+            )
+
+        lat_center = (extent.min_latitude + extent.max_latitude) / 2.0
+        zoom = self._select_zoom(target_resolution_m, lat_center)
+        while zoom > 0:
+            try:
+                mosaic, tx0, ty0 = self._fetch_mosaic(extent, zoom)
+                break
+            except ValueError:
+                zoom -= 1  # coarsen until the tile count fits the configured limit
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Analysis extent requires too many DEM tiles; select a smaller land area.",
+            )
+        self.zoom_used = zoom
+
+        n = 256.0 * (2**zoom)
+        lon = np.asarray(lon, dtype=np.float64)
+        lat = np.asarray(lat, dtype=np.float64)
+        px = (lon + 180.0) / 360.0 * n - tx0 * 256.0
+        py = (
+            1.0 - np.arcsinh(np.tan(np.radians(lat))) / math.pi
+        ) / 2.0 * n - ty0 * 256.0
+        return bilinear_sample(mosaic, py, px)
+
+
+class OpenTopographyProvider(DEMProvider):
+    """OpenTopography Global DEM API (optional; requires a free API key)."""
+
+    name = "opentopography"
+    dataset = "SRTMGL1"
+    attribution = OPEN_TOPOGRAPHY_ATTRIBUTION
+
+    def __init__(self, api_key: str, dataset: str, timeout_s: int, max_response_mb: int):
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail=(
+                    "OpenTopography DEM provider is configured but no API key is set. "
+                    "Set OPEN_TOPOGRAPHY_API_KEY or switch DEM_PROVIDER to aws_terrain_tiles."
+                ),
+            )
+        self.api_key = api_key
+        self.dataset = dataset
+        self.timeout_s = timeout_s
+        self.max_response_mb = max_response_mb
+        self._grid: Optional[np.ndarray] = None
+        self._header: dict = {}
+
+    def _pad(self) -> float:
+        return 3.0 * OT_DATASET_CELL_DEG.get(self.dataset, OT_DEFAULT_CELL_DEG)
+
+    def _fetch(self, extent: GeographicExtent) -> None:
+        pad = self._pad()
+        params = {
+            "demtype": self.dataset,
+            "south": str(extent.min_latitude - pad),
+            "north": str(extent.max_latitude + pad),
+            "west": str(extent.min_longitude - pad),
+            "east": str(extent.max_longitude + pad),
+            "outputFormat": "AAIGrid",
+            "API_Key": self.api_key,
+        }
+        try:
+            with httpx.Client(timeout=httpx.Timeout(10.0, read=float(self.timeout_s))) as client:
+                with client.stream("GET", OPEN_TOPOGRAPHY_GLOBALDEM_URL, params=params) as response:
+                    if response.status_code != 200:
+                        body = response.read().decode("utf-8", "replace")[:500]
+                        raise HTTPException(
+                            status_code=status.HTTP_502_BAD_GATEWAY,
+                            detail=f"OpenTopography request failed (HTTP {response.status_code}): {body}",
+                        )
+                    max_bytes = self.max_response_mb * 1024 * 1024
+                    buffer = io.BytesIO()
+                    received = 0
+                    for chunk in response.iter_bytes():
+                        received += len(chunk)
+                        if received > max_bytes:
+                            raise HTTPException(
+                                status_code=status.HTTP_502_BAD_GATEWAY,
+                                detail="OpenTopography response exceeds the maximum accepted size.",
+                            )
+                        buffer.write(chunk)
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"OpenTopography request failed: {exc}",
+            )
+        self._parse(buffer.getvalue().decode("utf-8", "replace"))
+
+    def _parse(self, text: str) -> None:
+        header: dict = {}
+        data_lines: List[str] = []
+        known = {"ncols", "nrows", "xllcorner", "yllcorner", "cellsize", "nodata_value"}
+        for line in text.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[0].lower() in known:
+                try:
+                    header[parts[0].lower()] = float(parts[1])
+                except ValueError:
+                    break
+            elif line.strip():
+                data_lines.append(line)
+        missing = known - set(header)
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"OpenTopography AAIGrid response is missing header fields: {sorted(missing)}.",
+            )
+        try:
+            grid = np.loadtxt(io.StringIO("\n".join(data_lines)), dtype=np.float32)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"OpenTopography AAIGrid response could not be parsed: {exc}",
+            )
+        if grid.ndim != 2 or grid.size == 0:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="OpenTopography AAIGrid response does not contain a 2D elevation grid.",
+            )
+        expected = (int(header["nrows"]), int(header["ncols"]))
+        if grid.shape != expected:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"OpenTopography grid shape {grid.shape} does not match header {expected}.",
+            )
+        self._grid = grid
+        self._header = header
+
+    def sample(self, extent: GeographicExtent, lon: np.ndarray, lat: np.ndarray, target_resolution_m: float) -> np.ndarray:
+        if self._grid is None:
+            self._fetch(extent)
+        grid = self._grid
+        nodata = self._header.get("nodata_value", -9999.0)
+        cellsize = float(self._header["cellsize"])
+        xll = float(self._header["xllcorner"])
+        yll = float(self._header["yllcorner"])
+        rows = grid.shape[0]
+        # AAIGrid row 0 is the northernmost row.
+        fy = (yll + rows * cellsize - lat) / cellsize
+        fx = (lon - xll) / cellsize
+        return bilinear_sample(grid, fy, fx)
+
+
+# --- Service ---------------------------------------------------------------------------
+
+
+class DEMService:
+    """Determines the analysis extent around the selected land and acquires the DEM."""
+
+    _memory_cache: "OrderedDict[str, DEMData]" = OrderedDict()
+
+    # -- analysis extent ----------------------------------------------------------------
+
+    @staticmethod
+    def compute_analysis_extent(
+        land_bbox: GeographicExtent, buffer_meters: float
+    ) -> GeographicExtent:
+        """Expand the land bounding box by `buffer_meters` on every side.
+
+        The selected land is the pond *construction* constraint, while the catchment
+        feeding a candidate pond may extend outside it — therefore the DEM/analysis
+        extent must include the surrounding terrain (documented strategy: land bbox +
+        uniform metric buffer, converted to degrees at the land's center latitude).
+        """
+        lat_center = (land_bbox.min_latitude + land_bbox.max_latitude) / 2.0
+        meters_per_deg_lat = 110_574.0
+        meters_per_deg_lon = 111_320.0 * max(0.01, math.cos(math.radians(lat_center)))
+        d_lat = buffer_meters / meters_per_deg_lat
+        d_lon = buffer_meters / meters_per_deg_lon
+        return GeographicExtent(
+            min_latitude=land_bbox.min_latitude - d_lat,
+            max_latitude=land_bbox.max_latitude + d_lat,
+            min_longitude=land_bbox.min_longitude - d_lon,
+            max_longitude=land_bbox.max_longitude + d_lon,
+        )
+
+    # -- cache --------------------------------------------------------------------------
+
+    @staticmethod
+    def _cache_key(provider_name: str, dataset: str, extent: GeographicExtent, resolution: float) -> str:
+        raw = (
+            f"{provider_name}|{dataset}|"
+            f"{extent.min_longitude:.6f},{extent.min_latitude:.6f},"
+            f"{extent.max_longitude:.6f},{extent.max_latitude:.6f}|"
+            f"{resolution:.3f}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _load_from_disk(cls, key: str) -> Optional[DEMData]:
+        cache_dir = Path(settings.DEM_CACHE_DIR)
+        npz_path = cache_dir / f"{key}.npz"
+        meta_path = cache_dir / f"{key}.json"
+        if not npz_path.exists() or not meta_path.exists():
+            return None
+        try:
+            with npz_path.open("rb") as f:
+                data = np.load(f)
+                grid = data["elevation"]
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            source = DEMSourceInfo(**meta["source"])
+            extent = GeographicExtent(**meta["geographic_extent"])
+            bounds = tuple(meta["bounds"])
+            return DEMData(
+                elevation_grid=grid,
+                crs=meta["crs"],
+                resolution_meters=meta["resolution_meters"],
+                bounds=bounds,  # type: ignore[arg-type]
+                geographic_extent=extent,
+                source=source,
+                nodata_cells_filled=int(meta["nodata_cells_filled"]),
+                cache_hit=True,
+            )
+        except Exception:
+            return None  # corrupted cache entries are simply re-acquired
+
+    @classmethod
+    def _store_on_disk(cls, key: str, dem: DEMData) -> None:
+        cache_dir = Path(settings.DEM_CACHE_DIR)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        npz_path = cache_dir / f"{key}.npz"
+        meta_path = cache_dir / f"{key}.json"
+        try:
+            with npz_path.open("wb") as f:
+                np.savez_compressed(f, elevation=dem.elevation_grid.astype(np.float32))
+            meta = {
+                "crs": dem.crs,
+                "resolution_meters": dem.resolution_meters,
+                "bounds": list(dem.bounds),
+                "geographic_extent": dem.geographic_extent.model_dump(),
+                "source": {
+                    "provider": dem.source.provider,
+                    "dataset": dem.source.dataset,
+                    "attribution": dem.source.attribution,
+                    "zoom_level": dem.source.zoom_level,
+                },
+                "nodata_cells_filled": dem.nodata_cells_filled,
+            }
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        except OSError:
+            pass  # disk caching is best-effort; memory caching still applies
+
+    @classmethod
+    def _cache_get(cls, key: str) -> Optional[DEMData]:
+        cached = cls._memory_cache.get(key)
+        if cached is not None:
+            cls._memory_cache.move_to_end(key)
+            hit = DEMData(**{**cached.__dict__, "cache_hit": True})
+            return hit
+        disk = cls._load_from_disk(key)
+        if disk is not None:
+            cls._memory_cache[key] = disk
+            if len(cls._memory_cache) > _MEMORY_CACHE_MAX_ENTRIES:
+                cls._memory_cache.popitem(last=False)
+            hit = DEMData(**{**disk.__dict__, "cache_hit": True})
+            return hit
+        return None
+
+    @classmethod
+    def _cache_put(cls, key: str, dem: DEMData) -> None:
+        cls._memory_cache[key] = dem
+        if len(cls._memory_cache) > _MEMORY_CACHE_MAX_ENTRIES:
+            cls._memory_cache.popitem(last=False)
+        cls._store_on_disk(key, dem)
+
+    # -- providers ----------------------------------------------------------------------
+
+    @staticmethod
+    def _provider_chain() -> List[DEMProvider]:
+        primary = settings.DEM_PROVIDER
+        providers: List[DEMProvider] = []
+
+        def _aws() -> Optional[DEMProvider]:
+            return AWSTerrainTilesProvider(
+                timeout_s=settings.DEM_REQUEST_TIMEOUT_S,
+                max_tiles=settings.DEM_MAX_TILES,
+            )
+
+        def _ot() -> Optional[DEMProvider]:
+            # OpenTopography requires a key; without one it is silently skipped so
+            # the remaining provider can serve as fallback (documented behavior).
+            if not settings.OPEN_TOPOGRAPHY_API_KEY:
+                return None
+            try:
+                return OpenTopographyProvider(
+                    api_key=settings.OPEN_TOPOGRAPHY_API_KEY,
+                    dataset=settings.OPEN_TOPOGRAPHY_DATASET,
+                    timeout_s=settings.DEM_REQUEST_TIMEOUT_S,
+                    max_response_mb=settings.DEM_MAX_RESPONSE_MB,
+                )
+            except HTTPException:
+                return None
+
+        if primary == "aws_terrain_tiles":
+            providers = [p for p in (_aws(), _ot()) if p is not None]
+        elif primary == "opentopography":
+            providers = [p for p in (_ot(), _aws()) if p is not None]
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unknown DEM_PROVIDER '{primary}'. Supported: aws_terrain_tiles, opentopography.",
+            )
+        if not providers:
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail=(
+                    "No DEM provider is available. Configure OPEN_TOPOGRAPHY_API_KEY "
+                    "or set DEM_PROVIDER=aws_terrain_tiles."
+                ),
+            )
+        return providers
+
+    # -- grid construction --------------------------------------------------------------
+
+    @staticmethod
+    def _build_utm_grid(
+        extent: GeographicExtent, target_resolution_m: float
+    ) -> Tuple[str, Tuple[float, float, float, float], np.ndarray, np.ndarray, float, int, int]:
+        center_lon = (extent.min_longitude + extent.max_longitude) / 2.0
+        center_lat = (extent.min_latitude + extent.max_latitude) / 2.0
+        epsg = TerrainService._compute_utm_epsg(center_lon, center_lat)
+        crs = f"EPSG:{epsg}"
+        to_utm = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+
+        corner_lons = [
+            extent.min_longitude,
+            extent.max_longitude,
+            extent.min_longitude,
+            extent.max_longitude,
+            center_lon,
+            center_lon,
+            extent.min_longitude,
+            extent.max_longitude,
+        ]
+        corner_lats = [
+            extent.min_latitude,
+            extent.min_latitude,
+            extent.max_latitude,
+            extent.max_latitude,
+            extent.min_latitude,
+            extent.max_latitude,
+            center_lat,
+            center_lat,
+        ]
+        xs, ys = to_utm.transform(corner_lons, corner_lats)
+        min_x, max_x = float(min(xs)), float(max(xs))
+        min_y, max_y = float(min(ys)), float(max(ys))
+        if max_x <= min_x or max_y <= min_y:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Analysis extent does not span a valid 2D area.",
+            )
+
+        resolution = target_resolution_m
+        max_dim_m = max(max_x - min_x, max_y - min_y)
+        if max_dim_m / resolution > settings.DEM_MAX_GRID_DIM:
+            resolution = round(max_dim_m / settings.DEM_MAX_GRID_DIM, 2)
+
+        cols = int(math.ceil((max_x - min_x) / resolution))
+        rows = int(math.ceil((max_y - min_y) / resolution))
+        x_centers = min_x + (np.arange(cols, dtype=np.float64) + 0.5) * resolution
+        y_centers = min_y + (np.arange(rows, dtype=np.float64) + 0.5) * resolution
+        grid_x, grid_y = np.meshgrid(x_centers, y_centers)
+
+        to_wgs = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+        lon_flat, lat_flat = to_wgs.transform(grid_x.ravel(), grid_y.ravel())
+
+        bounds = (min_x, max_x, min_y, max_y)
+        return crs, bounds, lon_flat, lat_flat, resolution, rows, cols
+
+    # -- validation ---------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_and_fill(grid: np.ndarray) -> Tuple[np.ndarray, int]:
+        nodata_mask = ~np.isfinite(grid)
+        filled = 0
+        if nodata_mask.any():
+            valid = ~nodata_mask
+            valid_fraction = float(valid.mean())
+            if valid_fraction < (1.0 - MAX_NODATA_FRACTION):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "Insufficient elevation data for the selected area: more than "
+                        f"{int(MAX_NODATA_FRACTION * 100)}% of the DEM cells are voids. "
+                        "Choose a different land area or DEM provider."
+                    ),
+                )
+            indices = distance_transform_edt(nodata_mask, return_distances=False, return_indices=True)
+            grid = grid[tuple(indices)]
+            filled = int(nodata_mask.sum())
+
+        if float(grid.min()) < MIN_PLAUSIBLE_ELEVATION_M or float(grid.max()) > MAX_PLAUSIBLE_ELEVATION_M:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="DEM source returned implausible elevation values; the area may be unsupported.",
+            )
+        return grid.astype(np.float32), filled
+
+    # -- public API ---------------------------------------------------------------------
+
+    @classmethod
+    def acquire_dem(
+        cls,
+        analysis_extent: GeographicExtent,
+        target_resolution_m: Optional[float] = None,
+    ) -> DEMData:
+        resolution = round(target_resolution_m or settings.DEM_TARGET_RESOLUTION_M, 2)
+
+        # Extent size guard (buffered extents can still be unreasonably large).
+        lat_mid = (analysis_extent.min_latitude + analysis_extent.max_latitude) / 2.0
+        extent_km_lat = (
+            (analysis_extent.max_latitude - analysis_extent.min_latitude) * 111_320.0 / 1000.0
+        )
+        extent_km_lon = (
+            (analysis_extent.max_longitude - analysis_extent.min_longitude)
+            * 111_320.0
+            * max(0.01, math.cos(math.radians(lat_mid)))
+            / 1000.0
+        )
+        if max(extent_km_lat, extent_km_lon) > settings.DEM_MAX_EXTENT_KM:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Analysis extent ({max(extent_km_lat, extent_km_lon):.1f} km) exceeds the "
+                    f"maximum supported extent of {settings.DEM_MAX_EXTENT_KM} km. Select a smaller land area."
+                ),
+            )
+
+        providers = cls._provider_chain()
+        key = cls._cache_key(providers[0].name, providers[0].dataset, analysis_extent, resolution)
+
+        cached = cls._cache_get(key)
+        if cached is not None:
+            return cached
+
+        crs, bounds, lon_flat, lat_flat, resolution, rows, cols = cls._build_utm_grid(
+            analysis_extent, resolution
+        )
+
+        grid: Optional[np.ndarray] = None
+        source: Optional[DEMSourceInfo] = None
+        last_error: Optional[HTTPException] = None
+        for provider in providers:
+            try:
+                elevations = provider.sample(analysis_extent, lon_flat, lat_flat, resolution)
+                zoom = getattr(provider, "zoom_used", None)
+                source = DEMSourceInfo(
+                    provider=provider.name,
+                    dataset=provider.dataset,
+                    attribution=provider.attribution,
+                    zoom_level=zoom,
+                )
+                grid, filled = cls._validate_and_fill(
+                    np.asarray(elevations, dtype=np.float32).reshape(rows, cols)
+                )
+                break
+            except HTTPException as exc:
+                last_error = exc
+                grid = None
+                source = None
+                continue
+        if grid is None or source is None:
+            raise last_error or HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="No DEM provider could supply elevation data for the selected area.",
+            )
+
+        dem = DEMData(
+            elevation_grid=grid,
+            crs=crs,
+            resolution_meters=resolution,
+            bounds=bounds,
+            geographic_extent=analysis_extent,
+            source=source,
+            nodata_cells_filled=filled,
+            cache_hit=False,
+        )
+        cls._cache_put(key, dem)
+        return dem
+````
+
+## File: app/services/land.py
+````python
+from typing import Any, Dict, Iterator, List
+
+from fastapi import HTTPException, status
+from pyproj import Geod
+from shapely.geometry import MultiPolygon as ShapelyMultiPolygon
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.geometry import mapping
+from shapely.ops import unary_union
+
+from app.core.config import settings
+from app.schemas.catchment import GeographicExtent
+from app.schemas.land import (
+    Centroid,
+    LandGeometry,
+    SelectedLand,
+)
+
+# Geodesic area engine on the WGS84 ellipsoid (the datum of EPSG:4326 input coordinates).
+_GEOD = Geod(ellps="WGS84")
+
+# A selection smaller than this is a degenerate sliver and cannot be meaningfully analyzed.
+MIN_SELECTION_AREA_SQ_M = 1.0
+
+
+class LandSelectionService:
+    """Validates a user-selected land polygon (GeoJSON) and computes its planning metrics.
+
+    Assumptions (documented):
+    - Area is computed as the geodesic polygon area on the WGS84 ellipsoid using
+      pyproj.Geod. This is projection-independent and accurate at village scale.
+    - Holes (interior rings) are subtracted; overlapping MultiPolygon parts are
+      merged via a union so shared area is never counted twice.
+    - The centroid is the planar (shapely) centroid in WGS84 degrees, which is an
+      adequate reference point for village-scale selections.
+    - Polygons whose longitude span suggests they cross the antimeridian are
+      rejected with a clear error instead of producing a silently wrong area.
+    """
+
+    @staticmethod
+    def _iter_positions(geometry: LandGeometry) -> Iterator[List[float]]:
+        if geometry.type == "Polygon":
+            rings = [geometry.coordinates]
+        else:
+            rings = geometry.coordinates
+        for polygon_rings in rings:
+            for ring in polygon_rings:
+                for pos in ring:
+                    yield pos
+
+    @classmethod
+    def _validate_coordinate_ranges(cls, geometry: LandGeometry) -> None:
+        for pos in cls._iter_positions(geometry):
+            lon, lat = pos[0], pos[1]
+            if not (-180.0 <= lon <= 180.0):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid longitude {lon} in selected land geometry. Longitudes must be within [-180, 180].",
+                )
+            if not (-90.0 <= lat <= 90.0):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid latitude {lat} in selected land geometry. Latitudes must be within [-90, 90].",
+                )
+
+    @staticmethod
+    def _validate_ring(ring: List[List[float]], ring_label: str) -> None:
+        if len(ring) < 4:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"{ring_label} must contain at least 4 positions "
+                    "(three distinct points plus the closing point)."
+                ),
+            )
+        if ring[0][0] != ring[-1][0] or ring[0][1] != ring[-1][1]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{ring_label} is not closed: the first and last positions must be identical.",
+            )
+        distinct = {(p[0], p[1]) for p in ring[:-1]}
+        if len(distinct) < 3:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{ring_label} is degenerate: it must contain at least 3 distinct positions.",
+            )
+
+    @classmethod
+    def _build_polygon(
+        cls,
+        polygon_rings: List[List[List[float]]],
+        label: str,
+    ) -> ShapelyPolygon:
+        if not polygon_rings:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{label} does not contain any coordinate rings.",
+            )
+        for idx, ring in enumerate(polygon_rings):
+            ring_label = f"{label} exterior ring" if idx == 0 else f"{label} interior ring #{idx}"
+            cls._validate_ring(ring, ring_label)
+        try:
+            polygon = ShapelyPolygon(
+                [(p[0], p[1]) for p in polygon_rings[0]],
+                [[(p[0], p[1]) for p in hole] for hole in polygon_rings[1:]],
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{label} could not be constructed as a valid polygon: {exc}",
+            )
+        if polygon.is_empty or not polygon.is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{label} is invalid (empty or self-intersecting).",
+            )
+        return polygon
+
+    @classmethod
+    def _to_shapely(cls, geometry: LandGeometry):
+        if geometry.type == "Polygon":
+            return cls._build_polygon(geometry.coordinates, "Selected land polygon")
+        if not geometry.coordinates:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="MultiPolygon must contain at least one polygon.",
+            )
+        polygons = [
+            cls._build_polygon(polygon_rings, f"Selected land polygon #{i}")
+            for i, polygon_rings in enumerate(geometry.coordinates, start=1)
+        ]
+        if len(polygons) == 1:
+            return polygons[0]
+        merged = unary_union(polygons)
+        if merged.is_empty:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="MultiPolygon geometry is empty after merging overlapping parts.",
+            )
+        return merged
+
+    @staticmethod
+    def _shapely_ring_geodesic_area(ring) -> float:
+        area, _ = _GEOD.geometry_area_perimeter(ring)
+        return abs(area)
+
+    @classmethod
+    def _geodesic_area_sq_m(cls, geom) -> float:
+        if geom.geom_type == "Polygon":
+            exterior = cls._shapely_ring_geodesic_area(geom.exterior)
+            holes = sum(cls._shapely_ring_geodesic_area(hole) for hole in geom.interiors)
+            return max(0.0, exterior - holes)
+        if isinstance(geom, ShapelyMultiPolygon) or geom.geom_type == "MultiPolygon":
+            return sum(cls._geodesic_area_sq_m(part) for part in geom.geoms)
+        # GeometryCollection (possible after union): sum polygon members only.
+        return sum(cls._geodesic_area_sq_m(part) for part in geom.geoms if part.geom_type == "Polygon")
+
+    @classmethod
+    def validate_and_measure(cls, geometry: LandGeometry) -> SelectedLand:
+        # Phase 10 guard: reject absurdly detailed polygons before any processing.
+        vertex_count = sum(1 for _ in cls._iter_positions(geometry))
+        if vertex_count > settings.MAX_LAND_VERTICES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Selected land geometry contains {vertex_count} vertices, exceeding the "
+                    f"maximum of {settings.MAX_LAND_VERTICES}. Simplify the polygon before submitting."
+                ),
+            )
+
+        cls._validate_coordinate_ranges(geometry)
+        shapely_geom = cls._to_shapely(geometry)
+
+        min_lon, min_lat, max_lon, max_lat = shapely_geom.bounds
+        if (max_lon - min_lon) > 180.0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Selected land polygon appears to cross the antimeridian (longitude span > 180 degrees). "
+                    "Split the selection into two polygons on either side of the 180th meridian."
+                ),
+            )
+
+        area_m2 = cls._geodesic_area_sq_m(shapely_geom)
+        if area_m2 < MIN_SELECTION_AREA_SQ_M:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Selected land polygon has zero or negligible area "
+                    f"({area_m2:.4f} m²); a measurable land area is required."
+                ),
+            )
+        max_area_m2 = settings.MAX_LAND_AREA_SQ_KM * 1_000_000.0
+        if area_m2 > max_area_m2:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Selected land area ({area_m2 / 1_000_000.0:.2f} km²) exceeds the maximum "
+                    f"supported extent of {settings.MAX_LAND_AREA_SQ_KM} km². Select a smaller area."
+                ),
+            )
+
+        return SelectedLand(
+            geometry=mapping(shapely_geom),
+            geometry_type=shapely_geom.geom_type,
+            area_m2=round(area_m2, 2),
+            area_hectares=round(area_m2 / 10_000.0, 4),
+            bounding_box=GeographicExtent(
+                min_latitude=round(min_lat, 7),
+                max_latitude=round(max_lat, 7),
+                min_longitude=round(min_lon, 7),
+                max_longitude=round(max_lon, 7),
+            ),
+            centroid=Centroid(
+                latitude=round(float(shapely_geom.centroid.y), 7),
+                longitude=round(float(shapely_geom.centroid.x), 7),
+            ),
+        )
+````
+
+## File: app/main.py
+````python
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from app.api.v1.api import api_router
+from app.core.config import settings
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(api_router, prefix=settings.API_V1_STR)
+
+# Frontend (Phase 9): lightweight static map application served by the same service.
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/app", StaticFiles(directory=str(_STATIC_DIR), html=True), name="frontend")
+
+
+@app.get("/", tags=["Root"])
+def root_endpoint():
+    return {
+        "project": settings.PROJECT_NAME,
+        "version": settings.VERSION,
+        "docs": "/docs",
+        "health": f"{settings.API_V1_STR}/health",
+        "frontend": "/app/",
+    }
+````
+
+## File: tests/test_health.py
+````python
+from fastapi import status
+
+
+def test_root_endpoint(client):
+    response = client.get("/")
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert "project" in data
+    assert "docs" in data
+    assert data["docs"] == "/docs"
+
+
+def test_v1_health_endpoint(client):
+    response = client.get("/api/v1/health")
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert "project_name" in data
+    assert "version" in data
+````
+
+## File: .gitignore
+````
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+.venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Testing and Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+
+# IDE and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary data and logs
+*.log
+tmp/
+temp/
+
+# DEM / rainfall caches
+data/cache/
+````
+
+## File: app/api/v1/api.py
+````python
+from fastapi import APIRouter
+from app.api.v1.endpoints import catchment, health, land, pond_site, terrain
+
+api_router = APIRouter()
+api_router.include_router(health.router, tags=["Health"])
+api_router.include_router(catchment.router, tags=["Catchment Analysis"])
+api_router.include_router(land.router, tags=["Land Selection"])
+api_router.include_router(terrain.router, tags=["Terrain Acquisition"])
+api_router.include_router(pond_site.router, tags=["Pond Planning"])
+````
+
+## File: app/core/config.py
+````python
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "Village Pond Planning System"
+    API_V1_STR: str = "/api/v1"
+    VERSION: str = "0.1.0"
+    DEBUG: bool = False
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+
+    # Maximum accepted user-selected land area (km²). Guards /analyzeLand and
+    # downstream terrain processing from unreasonably large selections.
+    MAX_LAND_AREA_SQ_KM: float = 100.0
+
+    # --- DEM acquisition (Phase 2A) ---
+    # Primary provider: "aws_terrain_tiles" (no API key) or "opentopography" (free API key).
+    DEM_PROVIDER: str = "aws_terrain_tiles"
+    # OpenTopography dataset (demtype) when that provider is used, e.g. SRTMGL1 (30 m).
+    OPEN_TOPOGRAPHY_DATASET: str = "SRTMGL1"
+    OPEN_TOPOGRAPHY_API_KEY: str = ""
+    # Buffer added around the selected land bbox to define the hydrological analysis
+    # extent (the catchment may extend beyond the selected land).
+    ANALYSIS_BUFFER_METERS: float = 500.0
+    # Target DEM grid resolution in meters (AWS tiles are resampled to this).
+    DEM_TARGET_RESOLUTION_M: float = 30.0
+    DEM_REQUEST_TIMEOUT_S: int = 45
+    DEM_CACHE_DIR: str = "data/cache/dem"
+    DEM_MAX_TILES: int = 64
+    DEM_MAX_GRID_DIM: int = 500
+    DEM_MAX_EXTENT_KM: float = 15.0
+    DEM_MAX_RESPONSE_MB: int = 64
+
+    # --- Rainfall acquisition (Phase 5) ---
+    RAINFALL_YEARS_WINDOW: int = 10
+    RAINFALL_REQUEST_TIMEOUT_S: int = 30
+    RAINFALL_CACHE_DIR: str = "data/cache/rainfall"
+
+    # --- Performance/scaling guards (Phase 10) ---
+    MAX_UPLOAD_SIZE_MB: float = 20.0
+    MAX_LAND_VERTICES: int = 2000
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
+
+
+settings = Settings()
+````
+
+## File: app/services/__init__.py
+````python
+from app.services.candidate_selection import CandidateScoringConfig, CandidateSelectionService
+from app.services.hydrology import HydrologyService
+from app.services.parser import ContourParserService
+from app.services.terrain import TerrainModel, TerrainService
+
+__all__ = [
+    "ContourParserService",
+    "TerrainModel",
+    "TerrainService",
+    "CandidateScoringConfig",
+    "CandidateSelectionService",
+    "HydrologyService",
+]
 ````
 
 ## File: app/services/candidate_selection.py
@@ -98261,12 +103569,23 @@ class CandidateScoringConfig:
 
 
 class CandidateSelectionService:
+    # Weighted scoring profile used when flow accumulation is available (DEM path):
+    # drainage convergence/upstream flow is the dominant factor, followed by slope
+    # suitability; relative elevation acts as a tie-breaking depression indicator.
+    # The weights are exposed in API responses so the scoring stays explainable.
+    FLOW_WEIGHTED_CONFIG = CandidateScoringConfig(
+        slope_weight=0.35,
+        elevation_weight=0.15,
+        flow_weight=0.50,
+    )
+
     @classmethod
     def identify_candidates(
         cls,
         terrain: TerrainModel,
         config: Optional[CandidateScoringConfig] = None,
         flow_accumulation: Optional[np.ndarray] = None,
+        candidate_mask: Optional[np.ndarray] = None,
     ) -> List[PondCandidateSite]:
         cfg = config or CandidateScoringConfig()
 
@@ -98310,6 +103629,13 @@ class CandidateSelectionService:
             work_grid[-buf:, :] = 0.0
             work_grid[:, :buf] = 0.0
             work_grid[:, -buf:] = 0.0
+
+        if candidate_mask is not None:
+            if candidate_mask.shape != work_grid.shape:
+                raise ValueError("candidate_mask shape must match the terrain grid shape")
+            work_grid[~candidate_mask] = 0.0
+            if not candidate_mask.any():
+                return []
 
         cell_radius = max(1, int(cfg.min_distance_meters / terrain.grid_resolution_meters))
         min_x, max_x, min_y, max_y = terrain.bounds
@@ -98358,44 +103684,31 @@ class CandidateSelectionService:
         return candidates
 ````
 
-## File: tests/test_health.py
-````python
-from fastapi import status
-
-
-def test_root_endpoint(client):
-    response = client.get("/")
-    assert response.status_code == status.HTTP_200_OK
-    data = response.json()
-    assert "project" in data
-    assert "docs" in data
-    assert data["docs"] == "/docs"
-
-
-def test_v1_health_endpoint(client):
-    response = client.get("/api/v1/health")
-    assert response.status_code == status.HTTP_200_OK
-    data = response.json()
-    assert data["status"] == "healthy"
-    assert "project_name" in data
-    assert "version" in data
+## File: .env.example
 ````
+PROJECT_NAME="Village Pond Planning System"
+API_V1_STR="/api/v1"
+DEBUG=False
+HOST="0.0.0.0"
+PORT=8000
+MAX_LAND_AREA_SQ_KM=100
 
-## File: app/services/__init__.py
-````python
-from app.services.candidate_selection import CandidateScoringConfig, CandidateSelectionService
-from app.services.hydrology import HydrologyService
-from app.services.parser import ContourParserService
-from app.services.terrain import TerrainModel, TerrainService
+# --- DEM acquisition ---
+# "aws_terrain_tiles" (no API key needed) or "opentopography" (free API key required)
+DEM_PROVIDER=aws_terrain_tiles
+OPEN_TOPOGRAPHY_DATASET=SRTMGL1
+OPEN_TOPOGRAPHY_API_KEY=
+# Buffer (meters) added around the selected land to define the analysis extent
+ANALYSIS_BUFFER_METERS=500
+# Target DEM resolution (meters)
+DEM_TARGET_RESOLUTION_M=30
+DEM_REQUEST_TIMEOUT_S=45
+DEM_CACHE_DIR=data/cache/dem
 
-__all__ = [
-    "ContourParserService",
-    "TerrainModel",
-    "TerrainService",
-    "CandidateScoringConfig",
-    "CandidateSelectionService",
-    "HydrologyService",
-]
+# --- Rainfall ---
+RAINFALL_YEARS_WINDOW=10
+RAINFALL_REQUEST_TIMEOUT_S=30
+RAINFALL_CACHE_DIR=data/cache/rainfall
 ````
 
 ## File: app/services/hydrology.py
@@ -98634,6 +103947,9 @@ class HydrologyService:
         terrain: TerrainModel,
         candidate: PondCandidateSite,
         snap_radius_meters: float = 100.0,
+        conditioned_dem: Optional[np.ndarray] = None,
+        flow_direction: Optional[np.ndarray] = None,
+        flow_accumulation: Optional[np.ndarray] = None,
     ) -> CatchmentResult:
         if (
             candidate.latitude < terrain.geographic_extent.min_latitude
@@ -98646,9 +103962,23 @@ class HydrologyService:
                 detail="Candidate location falls outside the analyzed terrain boundary.",
             )
 
-        filled_dem = cls.condition_dem(terrain.elevation_grid)
-        flow_dir = cls.calculate_flow_direction(filled_dem, terrain.grid_resolution_meters)
-        accumulation = cls.calculate_flow_accumulation(flow_dir, filled_dem)
+        # Precomputed grids may be shared by the caller (e.g. the DEM pipeline already
+        # computed them for candidate scoring) to avoid duplicate CPU-heavy work.
+        filled_dem = (
+            conditioned_dem
+            if conditioned_dem is not None
+            else cls.condition_dem(terrain.elevation_grid)
+        )
+        flow_dir = (
+            flow_direction
+            if flow_direction is not None
+            else cls.calculate_flow_direction(filled_dem, terrain.grid_resolution_meters)
+        )
+        accumulation = (
+            flow_accumulation
+            if flow_accumulation is not None
+            else cls.calculate_flow_accumulation(flow_dir, filled_dem)
+        )
 
         to_proj = Transformer.from_crs("EPSG:4326", terrain.crs, always_xy=True)
         cand_x, cand_y = to_proj.transform(candidate.longitude, candidate.latitude)
@@ -98719,9 +104049,11 @@ class HydrologyService:
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import numpy as np
+import shapely
 from pyproj import Transformer
 from scipy.interpolate import griddata
 from fastapi import HTTPException, status
+from shapely.ops import transform as shapely_transform
 
 from app.schemas.catchment import (
     GeographicExtent,
@@ -98730,6 +104062,42 @@ from app.schemas.catchment import (
     SlopeMetadata,
     TerrainMetadata,
 )
+
+
+@dataclass
+class DEMSourceInfo:
+    """Provenance of an automatically acquired DEM."""
+
+    provider: str
+    dataset: str
+    attribution: str
+    zoom_level: Optional[int] = None  # only for slippy-tile providers
+
+
+@dataclass
+class DEMData:
+    """Elevation grid resampled onto a regular projected (UTM) grid.
+
+    This is the "acquired DEM" handed to the terrain pipeline; it carries the same
+    geometric semantics as a reconstructed contour terrain (metric grid + bounds).
+    """
+
+    elevation_grid: np.ndarray  # (rows, cols) float32, meters
+    crs: str
+    resolution_meters: float
+    bounds: Tuple[float, float, float, float]  # (min_x, max_x, min_y, max_y) projected
+    geographic_extent: GeographicExtent  # WGS84 analysis extent (land bbox + buffer)
+    source: DEMSourceInfo
+    nodata_cells_filled: int = 0
+    cache_hit: bool = False
+
+    @property
+    def rows(self) -> int:
+        return int(self.elevation_grid.shape[0])
+
+    @property
+    def cols(self) -> int:
+        return int(self.elevation_grid.shape[1])
 
 
 @dataclass
@@ -98790,6 +104158,46 @@ class TerrainService:
         dy, dx = np.gradient(elevation_grid, resolution_meters, resolution_meters)
         slope_rad = np.arctan(np.sqrt(dx**2 + dy**2))
         return np.degrees(slope_rad)
+
+    @classmethod
+    def reconstruct_terrain_from_dem(cls, dem: DEMData) -> TerrainModel:
+        """Build a TerrainModel directly from an acquired DEM (no contour reconstruction)."""
+        grid = np.asarray(dem.elevation_grid, dtype=np.float64)
+        if grid.ndim != 2 or grid.shape[0] < 2 or grid.shape[1] < 2:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Acquired DEM grid is too small for terrain analysis.",
+            )
+        slope_grid = cls.calculate_slope(grid, dem.resolution_meters)
+        return TerrainModel(
+            elevation_grid=grid,
+            crs=dem.crs,
+            grid_resolution_meters=dem.resolution_meters,
+            bounds=dem.bounds,
+            geographic_extent=dem.geographic_extent,
+            min_elevation=float(grid.min()),
+            max_elevation=float(grid.max()),
+            slope_grid=slope_grid,
+        )
+
+    @staticmethod
+    def mask_cells_within_polygon(terrain: TerrainModel, polygon_wgs84) -> np.ndarray:
+        """Rasterize a WGS84 polygon onto the terrain grid (cell-center containment).
+
+        Cell coordinates use the same node mapping as the rest of the pipeline
+        (cell c at projected x = min_x + c * resolution). Returns a boolean grid of
+        the same shape; the result may be all-False when the polygon does not
+        overlap the terrain extent.
+        """
+        to_utm = Transformer.from_crs("EPSG:4326", terrain.crs, always_xy=True)
+        polygon_utm = shapely_transform(to_utm.transform, polygon_wgs84)
+        min_x, _, min_y, _ = terrain.bounds
+        res = terrain.grid_resolution_meters
+        xs = min_x + np.arange(terrain.cols, dtype=np.float64) * res
+        ys = min_y + np.arange(terrain.rows, dtype=np.float64) * res
+        grid_x, grid_y = np.meshgrid(xs, ys)
+        mask = shapely.contains_xy(polygon_utm, grid_x.ravel(), grid_y.ravel())
+        return mask.reshape(terrain.rows, terrain.cols)
 
     @classmethod
     def reconstruct_terrain(
@@ -98901,12 +104309,14 @@ numpy>=2.0.0
 scipy>=1.14.0
 pyproj>=3.6.0
 shapely>=2.0.0
+Pillow>=10.3.0
 gunicorn>=22.0.0
 ````
 
 ## File: app/api/v1/endpoints/catchment.py
 ````python
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from app.core.config import settings
 from app.schemas.catchment import ContourInspectionResponse
 from app.services.candidate_selection import CandidateSelectionService
 from app.services.hydrology import HydrologyService
@@ -98933,6 +104343,16 @@ async def find_catchment(
 ) -> ContourInspectionResponse:
     content = await file.read()
     filename = file.filename or "upload.kml"
+
+    max_upload_bytes = int(settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024)
+    if len(content) > max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Uploaded file exceeds the maximum accepted size of "
+                f"{settings.MAX_UPLOAD_SIZE_MB} MB."
+            ),
+        )
 
     # 1. KML extraction & archive unpacking
     kml_bytes, kml_entry_name, ext = ContourParserService.extract_kml_payload(content, filename)
@@ -100099,9 +105519,11 @@ class ContourParserService:
 
 ## File: README.md
 ````markdown
-# AI-Based Village Pond Planning System - Backend (Assignment 1 Phase 2)
+# AI-Based Village Pond Planning System (Assignment 2 — End-to-End Pond Planning)
 
-A modular, extensible FastAPI backend service for the AI-based Village Pond Planning System. This system processes village contour maps (uploaded in KML or KMZ formats) to dynamically reconstruct continuous digital elevation models (DEM), model surface slopes, identify promising candidate pond regions using explainable terrain criteria, simulate hydrological drainage via D8 flow modeling, and delineate upstream catchment boundaries and metric drainage areas formatted as GeoJSON.
+A modular FastAPI backend **plus lightweight map frontend** for the AI-based Village Pond Planning System. The user selects a land area on an interactive map; the backend automatically acquires a DEM from public elevation sources, reconstructs terrain and contours, sites a pond candidate inside the selected land using explainable terrain/hydrology criteria, delineates the upstream catchment (which may extend beyond the selected land), obtains historical rainfall, and estimates theoretical runoff, expected collectible water, and indicative pond storage — all returned as structured GeoJSON/JSON ready for map visualization.
+
+The original KML/KMZ contour-upload workflow (`/findCatchment`) is fully preserved as a fallback and for expert/testing use.
 
 ---
 
@@ -100132,30 +105554,59 @@ pond_catchment_backend/
 ├── app/
 │   ├── api/
 │   │   └── v1/
-│   │       ├── endpoints/
-│   │       │   ├── health.py             # System liveness and health check endpoint
-│   │       │   └── catchment.py          # Route orchestrator for /findCatchment & /analyzeContour
-│   │       └── api.py                    # V1 API router aggregator
+│   │   ├── endpoints/
+│   │   │   ├── health.py             # System liveness and health check endpoint
+│   │   │   ├── catchment.py          # Route orchestrator for /findCatchment & /analyzeContour (KML fallback)
+│   │   │   ├── land.py               # Route orchestrator for /analyzeLand (land selection)
+│   │   │   ├── terrain.py            # Route orchestrator for /terrainPreview (DEM acquisition preview)
+│   │   │   └── pond_site.py          # Route orchestrator for /analyzePondSite (unified workflow)
+│   │   └── api.py                    # V1 API router aggregator
 │   ├── core/
 │   │   └── config.py                     # Environment-driven settings (pydantic-settings)
 │   ├── models/                           # Domain models & database entity schemas
 │   ├── schemas/
 │   │   ├── health.py                     # Health check schemas
-│   │   └── catchment.py                  # Pydantic schemas: Contours, DEM, Candidates, Catchment, GeoJSON
+│   │   ├── catchment.py                  # Pydantic schemas: Contours, DEM, Candidates, Catchment, GeoJSON
+│   │   ├── land.py                       # Pydantic schemas: GeoJSON land selection, area, bbox, centroid
+│   │   ├── terrain.py                    # Pydantic schemas: terrain preview / DEM acquisition
+│   │   ├── rainfall.py                   # Pydantic schemas: rainfall statistics
+│   │   ├── water.py                      # Pydantic schemas: runoff / collectible water
+│   │   ├── pond.py                       # Pydantic schemas: indicative pond storage
+│   │   └── pond_site.py                  # Pydantic schemas: unified analysis request/response
 │   ├── services/
 │   │   ├── parser.py                     # KML/KMZ unpacking, XML parsing, & contour normalization
-│   │   ├── terrain.py                    # Dynamic UTM projection, DEM interpolation, & slope calculation
+│   │   ├── terrain.py                    # UTM projection, DEM interpolation, slope, DEM->TerrainModel, land mask
 │   │   ├── candidate_selection.py        # Explainable multi-factor candidate pond siting & ranking
-│   │   └── hydrology.py                  # Priority-Flood sink filling, D8 flow, snapping, & catchment delineation
+│   │   ├── hydrology.py                  # Priority-Flood sink filling, D8 flow, snapping, & catchment delineation
+│   │   ├── land.py                       # GeoJSON land-area validation & geodesic area measurement
+│   │   ├── dem.py                        # Automatic DEM acquisition (AWS Terrain Tiles / OpenTopography) + caching
+│   │   ├── contours.py                   # DEM -> contour lines (marching squares) as GeoJSON
+│   │   ├── rainfall.py                   # Historical rainfall (Open-Meteo, NASA POWER fallback) + caching
+│   │   ├── water.py                      # Transparent runoff / expected collectible water estimation
+│   │   ├── pond.py                       # Indicative pond storage sizing (separate from runoff)
+│   │   └── pond_planning.py              # Unified pipeline orchestration (Phase 8)
+│   ├── static/                           # Frontend (Leaflet map, no build step)
+│   │   ├── index.html                    # Map, drawing tools, results panel
+│   │   ├── app.js                        # Map interactions + API calls (no calculations)
+│   │   └── style.css
 │   ├── utils/
 │   │   └── file_handler.py               # File extension & archive validation utilities
-│   └── main.py                           # FastAPI application entry point, CORS, & routers
+│   └── main.py                           # FastAPI application entry point, CORS, routers, /app static mount
 ├── data/
+│   ├── cache/                            # DEM + rainfall disk caches (gitignored)
 │   └── sample/                           # Sample contour datasets
 │       └── contours_1m.kml               # 1,355 contour lines (1m interval, 267m - 298m elevation)
 ├── tests/
 │   ├── conftest.py                       # Pytest fixtures and TestClient configuration
-│   ├── test_catchment.py                 # Full unit & end-to-end integration test suite
+│   ├── test_catchment.py                 # Contour pipeline unit & end-to-end test suite
+│   ├── test_land.py                      # Land selection validation & measurement test suite
+│   ├── test_dem.py                       # DEM acquisition, caching & validation test suite
+│   ├── test_contours.py                  # Contour generation & DEM terrain integration tests
+│   ├── test_pond_siting.py               # Land-constrained candidates + catchment tests
+│   ├── test_rainfall.py                  # Rainfall parsing/fallback/caching tests
+│   ├── test_water.py                     # Runoff + storage estimation tests
+│   ├── test_pond_site.py                 # Unified /analyzePondSite end-to-end tests
+│   ├── test_limits_and_frontend.py       # Request-size guards + static frontend tests
 │   └── test_health.py                    # Health & status test suite
 ├── .env.example                          # Environment configuration template
 ├── .gitignore                            # Git exclusions for Python, venv, caches, logs
@@ -100223,10 +105674,177 @@ Live Service & API Documentation:
 | `GET` | `/api/v1/health` | Health Check | System liveness probe |
 | `POST` | `/api/v1/findCatchment` | Find Catchment & Siting | Upload contour map, analyze terrain, site pond, & delineate upstream catchment |
 | `POST` | `/api/v1/analyzeContour` | Analyze Contour (Alias) | Identical alias for `/findCatchment` |
+| `POST` | `/api/v1/analyzeLand` | Analyze Land Selection | Validate a user-selected land polygon (GeoJSON) and return area, bounding box, & centroid |
+| `POST` | `/api/v1/terrainPreview` | Terrain Preview (Auto DEM) | Acquire a DEM for the buffered analysis extent around a selected land polygon |
+| `POST` | `/api/v1/analyzePondSite` | **Unified Pond-Site Analysis** | Full workflow: land → DEM → terrain/contours → pond candidate → catchment → rainfall → water volume → storage |
+| `GET` | `/app/` | Frontend | Interactive map application (draw land, analyze, view overlays) |
 
 ### Request Format
-- **Content-Type**: `multipart/form-data`
-- **Parameter**: `file` (Binary file, extension `.kml` or `.kmz`)
+- **`/findCatchment` & `/analyzeContour`**: `multipart/form-data`, parameter `file` (Binary file, extension `.kml` or `.kmz`)
+- **`/analyzeLand` & `/terrainPreview`**: `application/json` with a `geometry` field containing a GeoJSON `Polygon` or `MultiPolygon`
+- **`/analyzePondSite`**: `multipart/form-data` with `request` (JSON string: `{"geometry": {...}, "analysis_parameters": {...}}`) and optionally `file` (KML/KMZ expert path)
+
+### Land Area Selection (`POST /api/v1/analyzeLand`)
+
+The first step of the pond-planning workflow. The user selects a land area on an interactive map; the frontend sends the selection as GeoJSON. The backend validates the geometry (closed rings, non-zero area, reasonable coordinate ranges and extent) and returns its metrics. This polygon becomes the spatial constraint for all subsequent terrain and hydrology analysis.
+
+**Request:**
+```json
+{
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [[81.290, 21.245], [81.296, 21.245], [81.296, 21.250], [81.290, 21.250], [81.290, 21.245]]
+        ]
+    }
+}
+```
+
+**Response (`200 OK`):**
+```json
+{
+  "status": "success",
+  "selected_land": {
+    "geometry": { "type": "Polygon", "coordinates": [...] },
+    "geometry_type": "Polygon",
+    "area_m2": 344776.38,
+    "area_hectares": 34.4776,
+    "bounding_box": {
+      "min_latitude": 21.245,
+      "max_latitude": 21.25,
+      "min_longitude": 81.29,
+      "max_longitude": 81.296
+    },
+    "centroid": { "latitude": 21.2475, "longitude": 81.293 }
+  },
+  "message": "Selected land area successfully validated and measured. This polygon constrains all subsequent terrain and hydrology analysis."
+}
+```
+
+**Validation & Assumptions:**
+- Area is computed as the **geodesic polygon area on the WGS84 ellipsoid** (`pyproj.Geod`) — projection-independent and accurate at village scale. Holes are subtracted; overlapping MultiPolygon parts are merged so shared area is never double-counted.
+- The centroid is the planar (shapely) centroid in WGS84 degrees — adequate for village-scale selections.
+- Rejected with `400 Bad Request`: unclosed rings, fewer than 4 positions, degenerate/collinear rings, self-intersecting polygons, out-of-range coordinates, selections crossing the antimeridian, and areas outside `[1 m², MAX_LAND_AREA_SQ_KM]` (default 100 km², configurable via the `MAX_LAND_AREA_SQ_KM` environment variable). Non-Polygon GeoJSON types are rejected with `422`.
+
+### Automatic DEM Acquisition (`POST /api/v1/terrainPreview`)
+
+For the normal user workflow, no KML upload is required: the backend acquires elevation data automatically for the area around the selected land. The KML/KMZ contour workflow (`/findCatchment`) remains fully supported as a fallback and for expert/manual use.
+
+**Concept — construction area vs. hydrological extent:** the selected land polygon is the pond *construction* constraint, while the catchment feeding a candidate pond may extend well outside it. The DEM is therefore acquired for an **analysis extent** = land bounding box + a uniform buffer (`ANALYSIS_BUFFER_METERS`, default 500 m) on every side, so upstream terrain is included in subsequent flow analysis.
+
+**Provider evaluation and decision:**
+
+| Criterion | AWS Terrain Tiles (default) | OpenTopography API (optional) |
+| :--- | :--- | :--- |
+| Coverage | Global | Global |
+| API key | **Not required** (public AWS Open Data bucket) | Free key required |
+| Rate limits | None documented for reasonable use | ~50 calls/24 h (non-academic) |
+| Format | Terrarium PNG tiles (z/x/y, zoom 0–15) | AAIGrid plain text (no GDAL needed) |
+| Effective resolution | ~10–30 m (SRTM/GMTED2010-derived) | 30 m (SRTMGL1) |
+| Reliability | AWS Open Data registry dataset | Established academic service |
+| Latency | Fast S3 delivery per tile (~1 s) | Slower server-side clipping |
+
+AWS Terrain Tiles is the default because it needs no registration and has no tight rate limits; OpenTopography can be enabled by setting `OPEN_TOPOGRAPHY_API_KEY` and is used automatically as a fallback provider when the primary fails.
+
+**Processing pipeline:** land bbox → buffered analysis extent → UTM grid construction (reusing the existing dynamic UTM zone logic) → tile fetch / AAIGrid fetch → bilinear resampling of the native raster onto the UTM grid at the target resolution (`DEM_TARGET_RESOLUTION_M`, default 30 m) → NoData nearest-neighbour fill → elevation plausibility validation (`-500 m` to `9000 m`).
+
+**Caching:** results are cached in memory (LRU, 4 entries) and on disk (`DEM_CACHE_DIR`, default `data/cache/dem`, compressed NPZ + JSON metadata). The cache key is a SHA-256 hash of provider, dataset, geographic extent (6-decimal precision) and resolution — identical areas are never re-downloaded. Elevation data does not change over time, so cache entries have no expiry.
+
+**Safeguards:** analysis extent ≤ `DEM_MAX_EXTENT_KM` (default 15 km), ≤ `DEM_MAX_TILES` per request (auto-coarsens zoom), grid dimension ≤ `DEM_MAX_GRID_DIM` (auto-coarsens resolution, mirroring the contour pipeline), per-request timeouts (`DEM_REQUEST_TIMEOUT_S`), response-size caps, and graceful `502`/`422` errors when providers are unreachable or the area has insufficient elevation data (polar regions outside Web Mercator coverage are rejected).
+
+**Attribution:** Terrain tiles: Mapzen/AWS Open Data. Global SRTM data courtesy of the U.S. Geological Survey; GMTED2010 courtesy of USGS; ETOPO1 courtesy of NOAA; regional sources per Mapzen attribution requirements.
+
+**Example request** (same body as `/analyzeLand`):
+```json
+{
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [[81.290, 21.245], [81.296, 21.245], [81.296, 21.250], [81.290, 21.250], [81.290, 21.245]]
+        ]
+    },
+    "buffer_meters": 500,
+    "resolution_meters": 30
+}
+```
+
+**Example response (`200 OK`, abridged):**
+```json
+{
+  "status": "success",
+  "analysis_extent": { "min_latitude": 21.2399, "max_latitude": 21.2551, "min_longitude": 81.2847, "max_longitude": 81.3013 },
+  "buffer_meters": 500.0,
+  "target_resolution_meters": 30.0,
+  "dem": {
+    "crs": "EPSG:32644",
+    "resolution_meters": 30.0,
+    "rows": 52,
+    "cols": 55,
+    "min_elevation_m": 266.44,
+    "max_elevation_m": 292.76,
+    "mean_elevation_m": 280.8,
+    "nodata_cells_filled": 0,
+    "source": {
+      "provider": "aws_terrain_tiles",
+      "dataset": "terrarium",
+      "zoom_level": 13,
+      "attribution": "Terrain tiles: Mapzen/AWS Open Data. ..."
+    },
+    "cache_hit": false
+  }
+}
+```
+
+### Unified Analysis (`POST /api/v1/analyzePondSite`)
+
+The complete end-to-end workflow. **Normal usage requires no file upload** — only the selected land GeoJSON; terrain is acquired automatically through the DEM service. A KML/KMZ contour file may be supplied instead for expert/testing use (backwards compatibility).
+
+**Workflow:** selected land → analysis extent (land bbox + buffer) → DEM acquisition (cached) → terrain & slope → contours (GeoJSON) → hydrology conditioning + D8 flow + accumulation (computed once, shared) → pond candidates (constrained to the selected land, flow-weighted scoring) → catchment delineation (not clipped to the land) → rainfall (cached) → theoretical runoff → expected collectible water → indicative pond storage.
+
+**Request** (multipart form field `request`):
+```json
+{
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [[81.290, 21.245], [81.296, 21.245], [81.296, 21.250], [81.290, 21.250], [81.290, 21.245]]
+        ]
+    },
+    "analysis_parameters": {
+        "buffer_meters": 500,
+        "contour_interval_m": 5,
+        "runoff_coefficient": 0.35,
+        "collection_efficiency": 0.75
+    }
+}
+```
+
+**Response structure (`200 OK`, abridged):**
+```json
+{
+  "status": "success",
+  "selected_land": { "area_m2": 344776.38, "area_hectares": 34.4776, "geometry": { "...": "GeoJSON Polygon" } },
+  "terrain": { "crs": "EPSG:32644", "grid_resolution_meters": 30.0, "rows": 52, "cols": 55, "slope": { "mean_slope_degrees": 1.85 } },
+  "contours": { "type": "FeatureCollection", "features": [ { "geometry": { "type": "LineString" }, "properties": { "elevation_m": 275.0 } } ] },
+  "pond": { "latitude": 21.2469, "longitude": 81.2899, "elevation": 269.4, "slope_degrees": 2.4, "suitability_score": 0.83, "factor_scores": { "slope_score": 1.0, "elevation_score": 0.9, "flow_score": 0.6 } },
+  "catchment": { "catchment_area_m2": 145000.0, "catchment_area_hectares": 14.5, "contributing_cells_count": 161, "boundary": { "type": "Feature", "geometry": { "type": "Polygon" } } },
+  "rainfall": { "rainfall_mm": 1213.4, "period": "2015-2024", "source": "open-meteo", "dataset": "ERA5 / ERA5-Land reanalysis" },
+  "water": {
+    "runoff_coefficient": 0.35,
+    "runoff_coefficient_basis": "Explicitly provided in the analysis parameters.",
+    "theoretical_runoff_m3": 61540.1,
+    "collection_efficiency": 0.75,
+    "expected_collectible_water_m3": 46155.1
+  },
+  "pond_storage": { "storage_capacity_m3": 46155.1, "depth_m": 3.0, "top_length_m": 190.3, "top_width_m": 132.9, "note": "Indicative conceptual sizing …" },
+  "dem_source": { "provider": "aws_terrain_tiles", "dataset": "terrarium", "zoom_level": 13 },
+  "message": "Terrain acquired automatically for the buffered analysis extent around the selected land. ..."
+}
+```
+
+> The values above are illustrative; every value is derived dynamically from the input geometry and acquired data — nothing is hard-coded.
+
+**Frontend (`GET /app/`):** a no-build Leaflet application served by the same backend. The user draws the land polygon on an interactive map (OSM or Esri satellite basemaps), submits it, sees loading/progress and error states, and the response overlays the selected land (blue), catchment boundary (green dashed), pond marker (red), and DEM contours (grey, toggleable). The frontend performs **no calculations** — all terrain, hydrology, rainfall, and water computations happen in the backend.
 
 ---
 
@@ -100286,6 +105904,29 @@ flowchart TD
    - **Metric Area & Polygonization (`polygonize_catchment`)**: Aggregates contributing cells into metric polygons using Shapely `box`, unions them via `unary_union`, transforms the boundary back to WGS84 `(longitude, latitude)`, and exports as a standard GeoJSON Feature polygon.
    - **Area Calculation**: Area is accurately computed in projected metric units:
      $$\text{Area } (m^2) = N_{\text{cells}} \times \text{resolution}^2, \quad \text{Area } (\text{ha}) = \frac{\text{Area } (m^2)}{10,000}$$
+
+The unified `/analyzePondSite` workflow (automatic DEM path) adds the following stages on top of the shared terrain/hydrology core:
+
+7. **Contour Generation from DEM (`ContourGenerationService.generate_contours`)**:
+   - Vectorized marching squares over the elevation grid at a configurable interval (default 5 m; minimum 1 m — finer intervals are rejected because they would imply precision the DEM cannot support).
+   - Segments are chained into LineStrings (closed rings stay closed) and converted to WGS84 GeoJSON `FeatureCollection` for direct frontend rendering.
+   - Level count is capped at 50; the interval coarsens automatically for very high-relief areas.
+
+8. **Land-Constrained Candidate Siting (DEM path)**:
+   - The selected land polygon is rasterized onto the terrain grid (`TerrainService.mask_cells_within_polygon`, cell-center containment via `shapely.contains_xy`).
+   - Candidates are chosen **only** from masked cells; the catchment feeding them is **not** clipped to the land.
+   - The DEM path uses the documented flow-weighted scoring profile: `slope_weight = 0.35`, `elevation_weight = 0.15`, `flow_weight = 0.50` — preferring locations with meaningful upstream flow convergence over simply the lowest elevation. Weights are returned in the response (`scoring_config`) for transparency.
+
+9. **Historical Rainfall (`RainfallService.get_rainfall`)**:
+   - Primary: **Open-Meteo Historical Weather API** (ERA5/ERA5-Land, ~9–11 km grid) — free, no API key, daily precipitation for the last 10 complete years → mean annual depth + monthly climatology.
+   - Fallback: **NASA POWER agroclimatology** (`PRECTOTCORR`, ~0.5° grid) — annual mean daily precipitation × 365.25.
+   - Both providers are free and key-less; identical requests are cached in memory and on disk (`data/cache/rainfall/`) with coordinates rounded to 2 decimals (~1.1 km).
+
+10. **Water Volume (`WaterVolumeService.estimate`) and Indicative Storage (`PondStorageService.suggest_pond_storage`)**:
+    - Theoretical runoff: $\text{Runoff (m}^3\text{)} = \text{Catchment Area (m}^2\text{)} \times \dfrac{\text{Rainfall (mm)}}{1000} \times C_{\text{runoff}}$
+    - Expected collectible water: $\text{Collectible} = \text{Runoff} \times \eta_{\text{collection}}$
+    - Defaults (documented, overridable per request): $C_{\text{runoff}} = 0.30$ (mid-range of the 0.2–0.5 typical values for small rural catchments, USDA SCS / FAO guidance) and $\eta_{\text{collection}} = 0.75$ (allowance for conveyance, seepage and evaporation losses). Theoretical runoff and collectible water are reported **separately**.
+    - Indicative storage sizes a truncated-pyramid basin ($V = d\,(A_{bottom}+A_{top})/2$, side slope 2H:1V, depth 3 m) whose capacity matches the collectible inflow. It is clearly labeled as conceptual sizing, **not** engineering design, and is kept strictly separate from runoff volume.
 
 ---
 
@@ -100410,9 +106051,34 @@ flowchart TD
 ## Assumptions & Limitations
 
 1. **Surface Topography Only**: Hydrological modeling assumes overland gravity-driven surface runoff based solely on the reconstructed elevation model. It does not account for sub-surface infiltration, groundwater tables, evaporation rates, or subterranean pipe networks.
-2. **Artificial Obstructions**: Existing man-made culverts, road bridges, ditches, or embankments not captured in the contour elevation data are not represented in the raster surface.
-3. **Linear DEM Interpolation**: Interpolation between contour lines utilizes linear barycentric interpolation over Delaunay triangles, which represents natural terrain well but may smooth sharp breaklines or micro-topographic features.
-4. **Preliminary Nature**: This backend is designed for macro-level preliminary siting and planning.
+2. **Artificial Obstructions**: Existing man-made culverts, road bridges, ditches, or embankments not captured in the elevation data are not represented in the raster surface.
+3. **DEM Resolution & Pond-Site Precision**: The automatic DEM path uses ~30 m resolution global data (AWS Terrain Tiles, resampled to `DEM_TARGET_RESOLUTION_M`). Pond-site precision is therefore limited to roughly one grid cell (~30 m), and derived elevations/slopes are planning-level approximations. Contour intervals below 1 m are refused to avoid implying unsupported precision.
+4. **Rainfall Data**: Rainfall comes from reanalysis/climatology products (ERA5 via Open-Meteo, ~9–11 km; NASA POWER, ~0.5°) — gridded estimates, not gauge measurements. Annual means smooth year-to-year variability and do not capture extreme-event dynamics.
+5. **Runoff Coefficient & Collection Efficiency**: The defaults (0.30 and 0.75) are documented planning assumptions within published typical ranges; they are not measured values for any specific catchment and can be overridden per request.
+6. **Storage Sizing Is Conceptual**: The pond-storage module produces an indicative basin geometry from an average-end-area frustum model with no freeboard, lining, or inlet/outlet structures. It is **not** a certified engineering design.
+7. **Linear DEM Interpolation** (KML path): Interpolation between contour lines utilizes linear barycentric interpolation over Delaunay triangles, which represents natural terrain well but may smooth sharp breaklines or micro-topographic features.
+8. **Preliminary Nature**: This system is designed for macro-level preliminary siting and planning.
+
+## Environment Variables
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `MAX_LAND_AREA_SQ_KM` | `100` | Maximum accepted selected-land area |
+| `DEM_PROVIDER` | `aws_terrain_tiles` | Primary DEM provider (`aws_terrain_tiles` or `opentopography`) |
+| `OPEN_TOPOGRAPHY_API_KEY` | *(empty)* | Enables the OpenTopography provider (free key) |
+| `OPEN_TOPOGRAPHY_DATASET` | `SRTMGL1` | OpenTopography `demtype` |
+| `ANALYSIS_BUFFER_METERS` | `500` | Buffer around the land bbox defining the analysis extent |
+| `DEM_TARGET_RESOLUTION_M` | `30` | Target DEM grid resolution |
+| `DEM_REQUEST_TIMEOUT_S` | `45` | External DEM request timeout |
+| `DEM_CACHE_DIR` | `data/cache/dem` | DEM disk cache directory |
+| `DEM_MAX_TILES` | `64` | Maximum tiles per acquisition (auto-coarsens zoom) |
+| `DEM_MAX_GRID_DIM` | `500` | Maximum grid dimension (auto-coarsens resolution) |
+| `DEM_MAX_EXTENT_KM` | `15` | Maximum analysis-extent size |
+| `RAINFALL_YEARS_WINDOW` | `10` | Historical window length for rainfall statistics |
+| `RAINFALL_REQUEST_TIMEOUT_S` | `30` | External rainfall request timeout |
+| `RAINFALL_CACHE_DIR` | `data/cache/rainfall` | Rainfall disk cache directory |
+| `MAX_UPLOAD_SIZE_MB` | `20` | KML/KMZ upload size limit |
+| `MAX_LAND_VERTICES` | `2000` | Maximum vertices per land polygon |
 
 ---
 
@@ -100439,23 +106105,42 @@ pytest tests/ -v
 - **Hydrological D8 Analysis**: Priority-Flood pit filling, flow direction downhill routing, flow accumulation monotonicity, drainage snapping with distance tie-breaking.
 - **Dynamic Input Variance**: Proves that varying input contour terrain produces strictly different candidate locations, snapped outlets, and catchment boundaries.
 - **End-to-End Integration**: Validates end-to-end execution against the sample dataset `data/sample/contours_1m.kml`.
+- **Land Selection**: Valid polygons/MultiPolygons/holes/3D positions and every validation failure mode (unclosed rings, zero area, antimeridian, oversize).
+- **DEM Acquisition**: Provider selection & fallback, deterministic caching (memory + disk), NoData handling, extent/grid safeguards, zoom selection, AAIGrid parsing, bilinear sampling, plus an opt-in live network test (`RUN_LIVE_DEM_TESTS=1`).
+- **Contour Generation**: Marching-squares levels, closed rings on synthetic cones, interval caps, DEM→TerrainModel bridge.
+- **Land-Constrained Siting & Catchment**: Candidates always inside the selected land; catchment demonstrably extends beyond it; precomputed-grid equivalence with the legacy path.
+- **Rainfall**: Response parsing (Open-Meteo & NASA POWER), provider fallback, caching, coordinate rounding, failure handling.
+- **Water & Storage**: Unit conversion, explicit coefficient handling, efficiency separation, capacity ≈ inflow sizing, invalid-input rejection.
+- **Unified API**: Full JSON workflow, KML fallback path, explicit-parameter override, terrain-source exclusivity, sub-cell selection rejection.
+- **Limits & Frontend**: Upload-size and vertex-count guards; static frontend serving (`/app/`).
 
 ---
 
-## Demonstration Using Provided Sample File
+## Demonstration
 
-### Using `curl`
+### End-to-end workflow (automatic DEM path — no file upload)
+
+```bash
+curl -X POST "https://pond-catchment-backend.onrender.com/api/v1/analyzePondSite" \
+  -F 'request={"geometry": {"type": "Polygon", "coordinates": [[[81.290, 21.245], [81.296, 21.245], [81.296, 21.250], [81.290, 21.250], [81.290, 21.245]]]}}'
+```
+
+The response contains the selected-land metrics, acquired DEM source, terrain/contour GeoJSON, the pond candidate, the catchment polygon, rainfall statistics, runoff/collectible-water figures, and indicative pond storage. Repeat calls for the same area are served from cache (`cache_hit: true`).
+
+### Frontend walkthrough
+
+1. Open `/app/` on the deployed service (or `http://localhost:8000/app/` locally).
+2. Choose a basemap (OpenStreetMap or Esri satellite).
+3. Click **Draw polygon** and click (or double-click) vertices around the village land; press **Finish** to close (minimum 3 vertices).
+4. Click **Analyze selected area** — the loading state shows while the backend acquires the DEM, runs hydrology, fetches rainfall, and computes water volumes.
+5. The map overlays the selected land (blue), catchment boundary (green dashed), pond marker (red), and DEM contours (grey, toggleable); the results panel shows all metrics with sources and assumptions.
+
+### KML/KMZ fallback (backward compatibility)
+
 ```bash
 curl -X POST "https://pond-catchment-backend.onrender.com/api/v1/findCatchment" \
   -F "file=@data/sample/contours_1m.kml"
 ```
-
-### Using Swagger UI
-1. Open [https://pond-catchment-backend.onrender.com/docs](https://pond-catchment-backend.onrender.com/docs).
-2. Expand `POST /api/v1/findCatchment`.
-3. Click **Try it out**.
-4. Choose `data/sample/contours_1m.kml`.
-5. Click **Execute** to view the parsed contours, reconstructed terrain metadata, candidate rankings, and the GeoJSON catchment polygon.
 
 ---
 

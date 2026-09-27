@@ -40,6 +40,23 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: float = 20.0
     MAX_LAND_VERTICES: int = 2000
 
+    # --- Distributed deployment (shared-cache / load-balanced phase) ---
+    # Redis URL for the shared L2 cache (e.g. redis://172.17.0.110:6379/1).
+    # Empty string disables Redis: the app then runs on local caches only and
+    # every cache operation degrades gracefully (never fatal).
+    REDIS_URL: str = ""
+    # Identifier of this API node, included in logs/diagnostics to demonstrate
+    # load balancing. Defaults to the machine hostname when empty.
+    NODE_ID: str = ""
+    APP_ENV: str = "production"
+    # Build metadata exposed via /version (never includes secrets).
+    GIT_COMMIT: str = ""
+    # Cache TTLs (seconds). Elevation data is static; rainfall statistics are
+    # refreshed weekly.
+    DEM_CACHE_TTL_S: int = 2_592_000
+    RAINFALL_CACHE_TTL_S: int = 604_800
+    LOG_LEVEL: str = "INFO"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

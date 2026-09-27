@@ -41,6 +41,7 @@ from fastapi import HTTPException, status
 
 from app.core.config import settings
 from app.schemas.catchment import GeographicExtent
+from app.services.cache import CacheLayer
 from app.services.terrain import DEMData, DEMSourceInfo, TerrainService
 
 # --- Documented constants -------------------------------------------------------------
@@ -184,17 +185,25 @@ class AWSTerrainTilesProvider(DEMProvider):
 
         mosaic = np.full((n_tiles_y * 256, n_tiles_x * 256), TERRARIUM_NODATA_MAX, dtype=np.float32)
         base_url = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium"
-        with httpx.Client(timeout=httpx.Timeout(10.0, read=float(self.timeout_s))) as client:
+        with httpx.Client(timeout=httpx.Timeout(connect=15.0, read=float(self.timeout_s), write=15.0, pool=15.0)) as client:
             for ty in range(ty0, ty1 + 1):
                 for tx in range(tx0, tx1 + 1):
                     url = f"{base_url}/{zoom}/{tx}/{ty}.png"
-                    try:
-                        response = client.get(url)
-                        response.raise_for_status()
-                    except httpx.HTTPError as exc:
+                    response = None
+                    last_exc = None
+                    for attempt in range(3):
+                        try:
+                            response = client.get(url)
+                            response.raise_for_status()
+                            break
+                        except httpx.HTTPError as exc:
+                            last_exc = exc
+                            import time
+                            time.sleep(1.0)
+                    if response is None:
                         raise HTTPException(
                             status_code=status.HTTP_502_BAD_GATEWAY,
-                            detail=f"DEM tile request failed ({self.name}, {url}): {exc}",
+                            detail=f"DEM tile request failed ({self.name}, {url}): {last_exc}",
                         )
                     png_bytes = response.content
                     if len(png_bytes) > 10 * 1024 * 1024:
@@ -474,20 +483,69 @@ class DEMService:
         except OSError:
             pass  # disk caching is best-effort; memory caching still applies
 
+    @staticmethod
+    def _serialize_dem(dem: DEMData) -> Tuple[bytes, str]:
+        """Serialize a DEMData to (npz_bytes, meta_json) for the shared cache."""
+        buffer = io.BytesIO()
+        np.savez_compressed(buffer, elevation=dem.elevation_grid.astype(np.float32))
+        meta = {
+            "crs": dem.crs,
+            "resolution_meters": dem.resolution_meters,
+            "bounds": list(dem.bounds),
+            "geographic_extent": dem.geographic_extent.model_dump(),
+            "source": {
+                "provider": dem.source.provider,
+                "dataset": dem.source.dataset,
+                "attribution": dem.source.attribution,
+                "zoom_level": dem.source.zoom_level,
+            },
+            "nodata_cells_filled": dem.nodata_cells_filled,
+        }
+        return buffer.getvalue(), json.dumps(meta)
+
+    @staticmethod
+    def _deserialize_dem(grid_bytes: bytes, meta_json: str, cache_hit: bool) -> Optional[DEMData]:
+        try:
+            with np.load(io.BytesIO(grid_bytes)) as data:
+                grid = data["elevation"]
+            meta = json.loads(meta_json)
+            source = DEMSourceInfo(**meta["source"])
+            extent = GeographicExtent(**meta["geographic_extent"])
+            return DEMData(
+                elevation_grid=grid,
+                crs=meta["crs"],
+                resolution_meters=meta["resolution_meters"],
+                bounds=tuple(meta["bounds"]),  # type: ignore[arg-type]
+                geographic_extent=extent,
+                source=source,
+                nodata_cells_filled=int(meta["nodata_cells_filled"]),
+                cache_hit=cache_hit,
+            )
+        except Exception:
+            return None
+
     @classmethod
     def _cache_get(cls, key: str) -> Optional[DEMData]:
         cached = cls._memory_cache.get(key)
         if cached is not None:
             cls._memory_cache.move_to_end(key)
-            hit = DEMData(**{**cached.__dict__, "cache_hit": True})
-            return hit
+            return DEMData(**{**cached.__dict__, "cache_hit": True})
+        # L2: shared Redis (binary NPZ grid + JSON metadata, TTL'd).
+        grid_bytes = CacheLayer.get_bytes("dem", f"{key}:grid")
+        meta_json = CacheLayer.get_json("dem", f"{key}:meta")
+        if grid_bytes is not None and meta_json is not None:
+            shared = cls._deserialize_dem(grid_bytes, json.dumps(meta_json), cache_hit=True)
+            if shared is not None:
+                cls._memory_cache[key] = shared
+                if len(cls._memory_cache) > _MEMORY_CACHE_MAX_ENTRIES:
+                    cls._memory_cache.popitem(last=False)
+                return DEMData(**{**shared.__dict__, "cache_hit": True})
         disk = cls._load_from_disk(key)
         if disk is not None:
             cls._memory_cache[key] = disk
             if len(cls._memory_cache) > _MEMORY_CACHE_MAX_ENTRIES:
                 cls._memory_cache.popitem(last=False)
-            hit = DEMData(**{**disk.__dict__, "cache_hit": True})
-            return hit
+            return DEMData(**{**disk.__dict__, "cache_hit": True})
         return None
 
     @classmethod
@@ -495,6 +553,15 @@ class DEMService:
         cls._memory_cache[key] = dem
         if len(cls._memory_cache) > _MEMORY_CACHE_MAX_ENTRIES:
             cls._memory_cache.popitem(last=False)
+        # Shared L2: any node can now serve this extent without a provider call.
+        try:
+            grid_bytes, meta_json = cls._serialize_dem(dem)
+            CacheLayer.set_bytes("dem", f"{key}:grid", grid_bytes, settings.DEM_CACHE_TTL_S)
+            CacheLayer.set_json(
+                "dem", f"{key}:meta", json.loads(meta_json), settings.DEM_CACHE_TTL_S
+            )
+        except Exception:
+            pass  # shared caching is best-effort
         cls._store_on_disk(key, dem)
 
     # -- providers ----------------------------------------------------------------------

@@ -1,0 +1,712 @@
+We are building an AI-based Village Pond Planning System.
+
+IMPORTANT:
+The repository already contains an implemented contour-analysis backend for KML/KMZ files. DO NOT rewrite or unnecessarily replace the existing contour parsing, terrain reconstruction, hydrology, candidate-selection, or catchment logic.
+
+First inspect the existing repository and understand the current architecture and APIs.
+
+The current contour-analysis subsystem already aims to:
+
+KML/KMZ
+→ contour parsing
+→ terrain/DEM reconstruction
+→ slope analysis
+→ pond candidate selection
+→ D8 flow/hydrology
+→ catchment delineation
+→ catchment area
+→ structured API response
+
+Your task now is to implement the NEXT PART of the system: extend the current backend into the complete pond-planning workflow described below.
+
+==================================================
+FINAL SYSTEM REQUIREMENTS
+==================================================
+
+The final application must provide:
+
+1. A fully working frontend.
+2. An option for the user to select a land area on an interactive map.
+3. Generation of pond-planning results based on the selected land area.
+4. Results must include:
+   - Suggested pond location
+   - Catchment area
+   - Expected water volume that can be collected
+5. The pond location, catchment area, and expected water volume must be visualized/overlaid on the map.
+6. The system should be fast and functional and should consider stress, scaling, memory, CPU, request size, and the limitations of the available deployment systems.
+
+==================================================
+IMPLEMENTATION STRATEGY
+==================================================
+
+Implement this in phases.
+
+Do NOT attempt to build everything as one giant change.
+
+After each phase:
+- run the existing tests
+- add appropriate tests
+- verify the API manually
+- preserve backwards compatibility where reasonable
+- keep the code modular
+
+==================================================
+PHASE 1 — LAND-AREA SELECTION
+==================================================
+
+Introduce a backend representation for the user-selected land area.
+
+The frontend should allow the user to draw/select an area on the map.
+
+The selected area should be sent to the backend as GeoJSON.
+
+Support at minimum:
+
+- Polygon
+- MultiPolygon if practical
+
+Example request conceptually:
+
+POST /analyzeLand
+
+{
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [...]
+    }
+}
+
+The backend should validate:
+
+- valid GeoJSON
+- valid polygon geometry
+- non-zero area
+- reasonable coordinate ranges
+- valid/reasonable geographic extent
+
+Calculate and return:
+
+- selected area in m²
+- selected area in hectares
+- bounding box
+- centroid
+
+Do not hard-code any location.
+
+The selected land polygon must become the spatial constraint for all subsequent analysis.
+
+==================================================
+PHASE 2 — CONNECT SELECTED LAND WITH TERRAIN ANALYSIS
+==================================================
+
+Modify the existing terrain/catchment pipeline so that analysis can be restricted to the selected land area.
+
+The workflow should become approximately:
+
+User-selected polygon
+        ↓
+Determine terrain/contour coverage
+        ↓
+Clip/mask terrain to selected area
+        ↓
+DEM
+        ↓
+Slope
+        ↓
+Hydrology
+        ↓
+Candidate pond locations
+        ↓
+Catchment analysis
+
+The selected polygon must NOT simply be ignored after being received.
+
+If the current KML contour map is used as the terrain source, determine how the selected polygon relates spatially to the contour map.
+
+Return a meaningful error if:
+
+- the selected land does not overlap the available terrain data
+- there are insufficient contour/elevation points
+- terrain reconstruction is not possible
+
+==================================================
+PHASE 3 — POND LOCATION GENERATION
+==================================================
+
+Use the existing candidate-selection and hydrology pipeline, but make it operate within the selected land area.
+
+The candidate generation should consider terrain characteristics rather than hard-coded coordinates.
+
+At minimum consider:
+
+- elevation
+- slope
+- flow accumulation
+- drainage convergence / hydrological connectivity
+- location inside the selected land area
+
+Avoid selecting a candidate simply because it is the lowest elevation point.
+
+A candidate should preferably be associated with a location where water can naturally accumulate or where meaningful upstream flow contributes.
+
+Generate one primary suggested pond location.
+
+Optionally retain several ranked candidates internally for future expansion.
+
+The response should include:
+
+- latitude
+- longitude
+- elevation
+- slope
+- suitability score
+- relevant hydrological metrics
+
+All candidate coordinates MUST be derived from the input terrain and selected land.
+
+==================================================
+PHASE 4 — CATCHMENT DELINEATION
+==================================================
+
+Use the existing hydrology implementation where possible.
+
+For the selected pond location:
+
+1. Determine the hydrological outlet/pour point.
+2. Determine upstream contributing cells.
+3. Generate the catchment boundary.
+4. Calculate catchment area.
+
+Return:
+
+- catchment area in m²
+- catchment area in hectares
+- catchment polygon as GeoJSON
+- contributing cell count
+- pond/outlet coordinates
+
+The catchment polygon must be suitable for direct visualization on a frontend map.
+
+Do not return only raster/grid coordinates.
+
+==================================================
+PHASE 5 — RAINFALL DATA
+==================================================
+
+Add rainfall as a separate service/module.
+
+The system must be capable of obtaining rainfall information for the analyzed location.
+
+You are FREE TO USE APPROPRIATE PUBLIC INTERNET RESOURCES/APIs for calculations and data acquisition where permitted.
+
+Research suitable publicly available rainfall/elevation/geospatial APIs if required.
+
+Potential sources can include APIs such as:
+
+- NASA POWER
+- Open-Meteo
+- IMD where publicly accessible
+- other reliable public geospatial/rainfall sources
+
+Do NOT blindly choose an API.
+
+Evaluate:
+
+- availability
+- API limits
+- historical coverage
+- spatial resolution
+- response latency
+- reliability
+- whether an API key is required
+- suitability for this project
+
+Keep the external API behind a service abstraction so it can be replaced later.
+
+For rainfall, obtain an appropriate historical rainfall statistic for the catchment/pond location.
+
+The response should clearly state:
+
+- rainfall period
+- rainfall amount
+- units
+- source/provider
+- timestamp/data period where applicable
+
+Cache rainfall responses when appropriate.
+
+Do not call an external rainfall API repeatedly for identical locations unnecessarily.
+
+==================================================
+PHASE 6 — EXPECTED WATER VOLUME
+==================================================
+
+Implement a transparent and explainable runoff/water-volume estimation model.
+
+At minimum the calculation should use:
+
+- catchment area
+- rainfall
+- an explicit runoff coefficient or equivalent runoff assumption
+
+A basic conceptual model may be:
+
+Runoff Volume =
+Catchment Area × Rainfall Depth × Runoff Coefficient
+
+Ensure units are consistent.
+
+For example:
+
+area in m²
+rainfall in metres
+volume in m³
+
+The runoff coefficient must NOT be hidden.
+
+Return:
+
+- catchment area
+- rainfall
+- runoff coefficient
+- estimated runoff volume
+- expected collectible water volume
+
+Clearly distinguish:
+
+"theoretical runoff"
+
+from
+
+"expected collectible water"
+
+if additional efficiency/loss factors are applied.
+
+Use documented assumptions.
+
+If appropriate, expose these assumptions in the API response so that the frontend can explain how the result was obtained.
+
+You are free to research standard hydrological calculation approaches and publicly available references using the internet.
+
+Do not invent scientific constants or formulas without documenting their origin/assumption.
+
+==================================================
+PHASE 7 — POND STORAGE ESTIMATION
+==================================================
+
+The current immediate requirement is expected water volume, but structure the system so that pond storage can later be calculated.
+
+Create a clean abstraction for:
+
+- estimated inflow/runoff volume
+- pond storage capacity
+- pond depth
+- pond dimensions
+
+Do NOT over-engineer this phase.
+
+The immediate output should primarily be:
+
+expected collectible water volume.
+
+If a storage estimate is implemented, clearly distinguish it from runoff volume.
+
+==================================================
+PHASE 8 — UNIFIED ANALYSIS API
+==================================================
+
+Create a clean API that combines the complete workflow.
+
+For example:
+
+POST /analyzeLand
+
+or
+
+POST /analyzePondSite
+
+Input:
+
+- selected land GeoJSON
+- terrain/contour source or reference to the uploaded contour map
+- optional analysis parameters
+
+The API should execute:
+
+Selected land
+    ↓
+Terrain extraction
+    ↓
+DEM
+    ↓
+Slope
+    ↓
+Hydrology
+    ↓
+Pond candidate
+    ↓
+Catchment
+    ↓
+Rainfall
+    ↓
+Runoff estimation
+    ↓
+Expected collectible water
+
+Return a structured response similar to:
+
+{
+    "status": "success",
+
+    "selected_land": {
+        "area_m2": ...,
+        "area_hectares": ...,
+        "geometry": {...}
+    },
+
+    "pond": {
+        "latitude": ...,
+        "longitude": ...,
+        "elevation_m": ...,
+        "slope_deg": ...,
+        "suitability_score": ...
+    },
+
+    "catchment": {
+        "area_m2": ...,
+        "area_hectares": ...,
+        "geometry": {...}
+    },
+
+    "rainfall": {
+        "period": "...",
+        "rainfall_mm": ...,
+        "source": "..."
+    },
+
+    "water": {
+        "runoff_coefficient": ...,
+        "estimated_runoff_m3": ...,
+        "expected_collectible_water_m3": ...
+    }
+}
+
+Use the project's existing Pydantic schema architecture instead of returning unvalidated dictionaries everywhere.
+
+==================================================
+PHASE 9 — FRONTEND MAP
+==================================================
+
+Build a functional frontend around the backend APIs.
+
+The frontend must provide:
+
+1. Interactive map.
+2. Ability to select/draw land area.
+3. Ability to submit the selected area for analysis.
+4. Loading/progress state.
+5. Results panel.
+6. Map overlays.
+
+The map should visualize:
+
+- selected land polygon
+- suggested pond location
+- catchment boundary
+- expected water volume information
+
+Use an appropriate map library.
+
+Possible choices include:
+
+- Leaflet
+- React-Leaflet
+- MapLibre
+- another suitable lightweight mapping solution
+
+Choose based on the existing repository/frontend architecture rather than introducing unnecessary dependencies.
+
+==================================================
+PHASE 10 — RESULT VISUALIZATION
+==================================================
+
+When analysis finishes, display:
+
+Pond Location:
+    latitude
+    longitude
+
+Catchment:
+    area in hectares / m²
+
+Water:
+    expected collectible volume in m³
+
+Rainfall:
+    rainfall amount + period + source
+
+On the map:
+
+- selected land → polygon
+- catchment → polygon overlay
+- pond → marker
+
+The user should be able to visually understand the relationship:
+
+selected land
+       ↓
+catchment
+       ↓
+pond location
+
+Do not make the frontend responsible for hydrological calculations.
+
+All calculations must happen in the backend.
+
+==================================================
+PHASE 11 — PERFORMANCE / SCALING
+==================================================
+
+The system needs to remain usable under realistic stress.
+
+Analyze and address:
+
+- very large KML/KMZ files
+- excessive contour points
+- very large DEM grids
+- expensive interpolation
+- repeated rainfall API requests
+- concurrent analysis requests
+- memory consumption
+- CPU-heavy hydrology calculations
+
+Implement reasonable safeguards such as:
+
+- upload size limits
+- maximum contour/vertex limits
+- DEM resolution limits
+- maximum raster dimensions
+- request validation
+- timeouts for external APIs
+- caching
+- graceful error handling
+
+Do NOT prematurely introduce distributed infrastructure unless actually necessary.
+
+Prefer simple optimizations first.
+
+For example:
+
+- spatially reduce unnecessary contour points
+- avoid repeatedly reconstructing the same terrain
+- cache rainfall requests
+- avoid unnecessary raster resolution
+- reuse intermediate calculations where safe
+
+==================================================
+PHASE 12 — TESTING
+==================================================
+
+Add tests for:
+
+INPUT:
+
+- valid KML
+- valid KMZ
+- invalid contour file
+- invalid GeoJSON
+- polygon outside terrain
+- empty polygon
+- extremely large input
+
+TERRAIN:
+
+- DEM generation
+- elevation range
+- slope generation
+
+HYDROLOGY:
+
+- flow direction
+- flow accumulation
+- catchment delineation
+- catchment area
+
+POND:
+
+- candidate generation
+- candidate constrained to selected land
+- candidate derived dynamically
+
+RAINFALL:
+
+- API response parsing
+- API failure
+- timeout
+- caching
+
+WATER:
+
+- unit conversion
+- runoff calculation
+- expected collectible volume
+
+API:
+
+- successful complete analysis
+- validation errors
+- graceful failures
+
+FRONTEND:
+
+- map loads
+- polygon selection
+- analysis request
+- result rendering
+- map overlays
+
+==================================================
+PHASE 13 — DEMONSTRATION
+==================================================
+
+Use the provided sample contour map to demonstrate the system.
+
+However:
+
+ABSOLUTELY NO SAMPLE-SPECIFIC HARD-CODING.
+
+Do NOT hard-code:
+
+- latitude
+- longitude
+- pond location
+- catchment polygon
+- catchment area
+- rainfall
+- water volume
+- elevation
+- candidate cell
+
+Everything must be derived from the input.
+
+The sample should only be used as test data.
+
+==================================================
+IMPORTANT ENGINEERING RULES
+==================================================
+
+1. First inspect the entire existing repository before modifying it.
+
+2. Reuse existing services and schemas wherever possible.
+
+3. Do not duplicate existing contour/hydrology implementations.
+
+4. Do not rewrite working code without a concrete reason.
+
+5. Keep responsibilities separated:
+
+parser
+terrain
+hydrology
+candidate selection
+catchment
+rainfall
+water estimation
+API
+frontend
+
+6. Keep calculations deterministic where possible.
+
+7. Every scientific/hydrological assumption must be documented.
+
+8. You are explicitly allowed to research calculations, algorithms, APIs, standards, and geospatial/hydrological methods from reliable internet resources when needed.
+
+9. Prefer authoritative sources, official API documentation, scientific references, and established geospatial libraries.
+
+10. If an external API is used, isolate it behind a service interface.
+
+11. Do not make the system dependent on a single external API when a reasonable fallback is possible.
+
+12. Do not introduce an ML model unless there is a clear technical reason. A deterministic terrain/hydrology approach is preferable for this requirement.
+
+13. Do not over-engineer.
+
+14. Keep the system explainable because the project must be demonstrated and the implementation decisions must be explainable.
+
+15. Update README/API documentation with:
+    - API endpoints
+    - request examples
+    - response examples
+    - calculation methodology
+    - assumptions
+    - external APIs/data sources
+    - setup instructions
+
+==================================================
+DEFINITION OF DONE
+==================================================
+
+The implementation is considered successful when:
+
+A user can:
+
+1. Open the frontend.
+2. See an interactive map.
+3. Select/draw a land area.
+4. Submit the selected area.
+5. Backend analyzes the terrain.
+6. Backend identifies a suitable pond location.
+7. Backend determines the contributing catchment.
+8. Backend calculates catchment area.
+9. Backend obtains appropriate rainfall information.
+10. Backend estimates expected collectible water volume.
+11. Frontend displays:
+       - selected land
+       - pond location
+       - catchment polygon
+       - expected water volume
+12. The entire workflow works using dynamically derived values.
+13. No coordinates/results are hard-coded for the sample.
+14. Existing tests continue to pass.
+15. New functionality has appropriate tests.
+16. The implementation remains reasonably fast and memory-conscious.
+
+Before making changes, inspect the current repository and provide a short implementation assessment identifying:
+- what already exists
+- what can be reused
+- what needs modification
+- what new modules/routes/components are required
+
+Then implement the work phase-by-phase rather than making one uncontrolled rewrite.
+
+
+
+One important thing I'd emphasize to the coding agent
+
+For water volume, don't let it simply do:
+
+catchment area × rainfall
+
+and call that the answer.
+
+The backend should expose the assumptions:
+
+Catchment Area
+      ×
+Rainfall Depth
+      ×
+Runoff Coefficient
+      ×
+Collection Efficiency
+      =
+Expected Collectible Water
+
+That makes the result much easier to defend during your demo, especially because the assignment explicitly expects rainfall information, runoff estimation, and storage-related calculations.
+
+Also, your existing codebase already has a fairly clear service separation and API structure, so the agent should extend that architecture rather than flattening everything into one endpoint.
+
+The best immediate implementation target after your current contour work is therefore:
+
+Map selection → selected polygon → terrain constrained to polygon → pond candidate → catchment → rainfall → water volume → GeoJSON/result response → frontend visualization.
+
+That gives you the complete end-to-end backbone required by the final assignment without prematurely adding unrelated features.

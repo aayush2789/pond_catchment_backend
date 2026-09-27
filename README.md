@@ -31,21 +31,27 @@ pond_catchment_backend/
 ├── app/
 │   ├── api/
 │   │   └── v1/
-│   │       ├── endpoints/
-│   │       │   ├── health.py             # System liveness and health check endpoint
-│   │       │   └── catchment.py          # Route orchestrator for /findCatchment & /analyzeContour
-│   │       └── api.py                    # V1 API router aggregator
+│   │   ├── endpoints/
+│   │   │   ├── health.py             # System liveness and health check endpoint
+│   │   │   ├── catchment.py          # Route orchestrator for /findCatchment & /analyzeContour
+│   │   │   ├── land.py               # Route orchestrator for /analyzeLand (land selection)
+│   │   │   └── terrain.py            # Route orchestrator for /terrainPreview (auto DEM acquisition)
+│   │   └── api.py                    # V1 API router aggregator
 │   ├── core/
 │   │   └── config.py                     # Environment-driven settings (pydantic-settings)
 │   ├── models/                           # Domain models & database entity schemas
 │   ├── schemas/
 │   │   ├── health.py                     # Health check schemas
-│   │   └── catchment.py                  # Pydantic schemas: Contours, DEM, Candidates, Catchment, GeoJSON
+│   │   ├── catchment.py                  # Pydantic schemas: Contours, DEM, Candidates, Catchment, GeoJSON
+│   │   ├── land.py                       # Pydantic schemas: GeoJSON land selection, area, bbox, centroid
+│   │   └── terrain.py                    # Pydantic schemas: terrain preview / DEM acquisition
 │   ├── services/
 │   │   ├── parser.py                     # KML/KMZ unpacking, XML parsing, & contour normalization
 │   │   ├── terrain.py                    # Dynamic UTM projection, DEM interpolation, & slope calculation
 │   │   ├── candidate_selection.py        # Explainable multi-factor candidate pond siting & ranking
-│   │   └── hydrology.py                  # Priority-Flood sink filling, D8 flow, snapping, & catchment delineation
+│   │   ├── hydrology.py                  # Priority-Flood sink filling, D8 flow, snapping, & catchment delineation
+│   │   ├── land.py                       # GeoJSON land-area validation & geodesic area measurement
+│   │   └── dem.py                        # Automatic DEM acquisition (public providers), caching & validation
 │   ├── utils/
 │   │   └── file_handler.py               # File extension & archive validation utilities
 │   └── main.py                           # FastAPI application entry point, CORS, & routers
@@ -55,6 +61,8 @@ pond_catchment_backend/
 ├── tests/
 │   ├── conftest.py                       # Pytest fixtures and TestClient configuration
 │   ├── test_catchment.py                 # Full unit & end-to-end integration test suite
+│   ├── test_land.py                      # Land selection validation & measurement test suite
+│   ├── test_dem.py                       # DEM acquisition, caching & validation test suite
 │   └── test_health.py                    # Health & status test suite
 ├── .env.example                          # Environment configuration template
 ├── .gitignore                            # Git exclusions for Python, venv, caches, logs
@@ -122,10 +130,123 @@ Live Service & API Documentation:
 | `GET` | `/api/v1/health` | Health Check | System liveness probe |
 | `POST` | `/api/v1/findCatchment` | Find Catchment & Siting | Upload contour map, analyze terrain, site pond, & delineate upstream catchment |
 | `POST` | `/api/v1/analyzeContour` | Analyze Contour (Alias) | Identical alias for `/findCatchment` |
+| `POST` | `/api/v1/analyzeLand` | Analyze Land Selection | Validate a user-selected land polygon (GeoJSON) and return area, bounding box, & centroid |
+| `POST` | `/api/v1/terrainPreview` | Terrain Preview (Auto DEM) | Acquire a DEM for the buffered analysis extent around a selected land polygon |
 
 ### Request Format
-- **Content-Type**: `multipart/form-data`
-- **Parameter**: `file` (Binary file, extension `.kml` or `.kmz`)
+- **`/findCatchment` & `/analyzeContour`**: `multipart/form-data`, parameter `file` (Binary file, extension `.kml` or `.kmz`)
+- **`/analyzeLand` & `/terrainPreview`**: `application/json` with a `geometry` field containing a GeoJSON `Polygon` or `MultiPolygon`
+
+### Land Area Selection (`POST /api/v1/analyzeLand`)
+
+The first step of the pond-planning workflow. The user selects a land area on an interactive map; the frontend sends the selection as GeoJSON. The backend validates the geometry (closed rings, non-zero area, reasonable coordinate ranges and extent) and returns its metrics. This polygon becomes the spatial constraint for all subsequent terrain and hydrology analysis.
+
+**Request:**
+```json
+{
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [[81.290, 21.245], [81.296, 21.245], [81.296, 21.250], [81.290, 21.250], [81.290, 21.245]]
+        ]
+    }
+}
+```
+
+**Response (`200 OK`):**
+```json
+{
+  "status": "success",
+  "selected_land": {
+    "geometry": { "type": "Polygon", "coordinates": [...] },
+    "geometry_type": "Polygon",
+    "area_m2": 344776.38,
+    "area_hectares": 34.4776,
+    "bounding_box": {
+      "min_latitude": 21.245,
+      "max_latitude": 21.25,
+      "min_longitude": 81.29,
+      "max_longitude": 81.296
+    },
+    "centroid": { "latitude": 21.2475, "longitude": 81.293 }
+  },
+  "message": "Selected land area successfully validated and measured. This polygon constrains all subsequent terrain and hydrology analysis."
+}
+```
+
+**Validation & Assumptions:**
+- Area is computed as the **geodesic polygon area on the WGS84 ellipsoid** (`pyproj.Geod`) — projection-independent and accurate at village scale. Holes are subtracted; overlapping MultiPolygon parts are merged so shared area is never double-counted.
+- The centroid is the planar (shapely) centroid in WGS84 degrees — adequate for village-scale selections.
+- Rejected with `400 Bad Request`: unclosed rings, fewer than 4 positions, degenerate/collinear rings, self-intersecting polygons, out-of-range coordinates, selections crossing the antimeridian, and areas outside `[1 m², MAX_LAND_AREA_SQ_KM]` (default 100 km², configurable via the `MAX_LAND_AREA_SQ_KM` environment variable). Non-Polygon GeoJSON types are rejected with `422`.
+
+### Automatic DEM Acquisition (`POST /api/v1/terrainPreview`)
+
+For the normal user workflow, no KML upload is required: the backend acquires elevation data automatically for the area around the selected land. The KML/KMZ contour workflow (`/findCatchment`) remains fully supported as a fallback and for expert/manual use.
+
+**Concept — construction area vs. hydrological extent:** the selected land polygon is the pond *construction* constraint, while the catchment feeding a candidate pond may extend well outside it. The DEM is therefore acquired for an **analysis extent** = land bounding box + a uniform buffer (`ANALYSIS_BUFFER_METERS`, default 500 m) on every side, so upstream terrain is included in subsequent flow analysis.
+
+**Provider evaluation and decision:**
+
+| Criterion | AWS Terrain Tiles (default) | OpenTopography API (optional) |
+| :--- | :--- | :--- |
+| Coverage | Global | Global |
+| API key | **Not required** (public AWS Open Data bucket) | Free key required |
+| Rate limits | None documented for reasonable use | ~50 calls/24 h (non-academic) |
+| Format | Terrarium PNG tiles (z/x/y, zoom 0–15) | AAIGrid plain text (no GDAL needed) |
+| Effective resolution | ~10–30 m (SRTM/GMTED2010-derived) | 30 m (SRTMGL1) |
+| Reliability | AWS Open Data registry dataset | Established academic service |
+| Latency | Fast S3 delivery per tile (~1 s) | Slower server-side clipping |
+
+AWS Terrain Tiles is the default because it needs no registration and has no tight rate limits; OpenTopography can be enabled by setting `OPEN_TOPOGRAPHY_API_KEY` and is used automatically as a fallback provider when the primary fails.
+
+**Processing pipeline:** land bbox → buffered analysis extent → UTM grid construction (reusing the existing dynamic UTM zone logic) → tile fetch / AAIGrid fetch → bilinear resampling of the native raster onto the UTM grid at the target resolution (`DEM_TARGET_RESOLUTION_M`, default 30 m) → NoData nearest-neighbour fill → elevation plausibility validation (`-500 m` to `9000 m`).
+
+**Caching:** results are cached in memory (LRU, 4 entries) and on disk (`DEM_CACHE_DIR`, default `data/cache/dem`, compressed NPZ + JSON metadata). The cache key is a SHA-256 hash of provider, dataset, geographic extent (6-decimal precision) and resolution — identical areas are never re-downloaded. Elevation data does not change over time, so cache entries have no expiry.
+
+**Safeguards:** analysis extent ≤ `DEM_MAX_EXTENT_KM` (default 15 km), ≤ `DEM_MAX_TILES` per request (auto-coarsens zoom), grid dimension ≤ `DEM_MAX_GRID_DIM` (auto-coarsens resolution, mirroring the contour pipeline), per-request timeouts (`DEM_REQUEST_TIMEOUT_S`), response-size caps, and graceful `502`/`422` errors when providers are unreachable or the area has insufficient elevation data (polar regions outside Web Mercator coverage are rejected).
+
+**Attribution:** Terrain tiles: Mapzen/AWS Open Data. Global SRTM data courtesy of the U.S. Geological Survey; GMTED2010 courtesy of USGS; ETOPO1 courtesy of NOAA; regional sources per Mapzen attribution requirements.
+
+**Example request** (same body as `/analyzeLand`):
+```json
+{
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+            [[81.290, 21.245], [81.296, 21.245], [81.296, 21.250], [81.290, 21.250], [81.290, 21.245]]
+        ]
+    },
+    "buffer_meters": 500,
+    "resolution_meters": 30
+}
+```
+
+**Example response (`200 OK`, abridged):**
+```json
+{
+  "status": "success",
+  "analysis_extent": { "min_latitude": 21.2399, "max_latitude": 21.2551, "min_longitude": 81.2847, "max_longitude": 81.3013 },
+  "buffer_meters": 500.0,
+  "target_resolution_meters": 30.0,
+  "dem": {
+    "crs": "EPSG:32644",
+    "resolution_meters": 30.0,
+    "rows": 52,
+    "cols": 55,
+    "min_elevation_m": 266.44,
+    "max_elevation_m": 292.76,
+    "mean_elevation_m": 280.8,
+    "nodata_cells_filled": 0,
+    "source": {
+      "provider": "aws_terrain_tiles",
+      "dataset": "terrarium",
+      "zoom_level": 13,
+      "attribution": "Terrain tiles: Mapzen/AWS Open Data. ..."
+    },
+    "cache_hit": false
+  }
+}
+```
 
 ---
 

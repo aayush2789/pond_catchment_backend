@@ -16,13 +16,13 @@ import paramiko
 HOST = "10.1.75.53"
 
 
-def connect_with_retry(password: str, port: int, attempts: int = 4, backoff: float = 4.0):
+def connect_with_retry(password: str, port: int, attempts: int = 6, backoff: float = 1.5):
     last_exc = None
     for i in range(attempts):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
-            client.connect(HOST, port=port, username="student", password=password, timeout=25)
+            client.connect(HOST, port=port, username="student", password=password, timeout=10)
             return client
         except Exception as exc:  # noqa: BLE001
             last_exc = exc

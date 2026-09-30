@@ -7,9 +7,20 @@ cd ~/pond_catchment_backend
 
 if [ ! -d venv ]; then
   python3 -m venv venv
+  ./venv/bin/pip install -q --upgrade pip 2>/dev/null || true
+  ./venv/bin/pip install -q -r requirements.txt
+  md5sum requirements.txt | cut -d' ' -f1 > venv/.req_md5
+elif [ -f requirements.txt ]; then
+  CURR_MD5=$(md5sum requirements.txt | cut -d' ' -f1)
+  SAVED_MD5=$(cat venv/.req_md5 2>/dev/null || true)
+  if [ "$CURR_MD5" != "$SAVED_MD5" ]; then
+    echo "--- requirements.txt changed, installing dependencies ---"
+    ./venv/bin/pip install -q -r requirements.txt
+    echo "$CURR_MD5" > venv/.req_md5
+  else
+    echo "--- dependencies unchanged, skipping pip install ---"
+  fi
 fi
-./venv/bin/pip install -q --upgrade pip 2>/dev/null || true
-./venv/bin/pip install -q -r requirements.txt
 
 # Stop a previous pond daemon (matched by OUR venv path only).
 if [ -f gunicorn.pid ]; then

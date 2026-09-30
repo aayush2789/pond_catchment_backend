@@ -8,19 +8,21 @@ The original KML/KMZ contour-upload workflow (`/findCatchment`) is fully preserv
 
 ## Deployment Status & Live Service
 
-[![Deployment Status](https://img.shields.io/badge/Render-Live%20Online-success?style=for-the-badge&logo=render)](https://pond-catchment-backend.onrender.com/docs)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.110.0-009688?style=for-the-badge&logo=fastapi)](https://pond-catchment-backend.onrender.com/docs)
-[![Python 3.12](https://img.shields.io/badge/Python-3.12.3-3776AB?style=for-the-badge&logo=python)](https://pond-catchment-backend.onrender.com/docs)
+[![Deployment Status](https://img.shields.io/badge/Cluster-Live%20Online-success?style=for-the-badge&logo=nginx)](http://10.1.75.53:3309/app/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110.0-009688?style=for-the-badge&logo=fastapi)](http://10.1.75.53:3309/docs)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12.3-3776AB?style=for-the-badge&logo=python)](http://10.1.75.53:3309/docs)
 
-The backend service is actively deployed and hosted live on **Render**:
+The backend service is actively deployed and hosted live on the **4-node load-balanced server cluster**:
 
 | Resource | Live URL | Status | Description |
 | :--- | :--- | :--- | :--- |
-| **Interactive API Docs (Swagger UI)** | [https://pond-catchment-backend.onrender.com/docs](https://pond-catchment-backend.onrender.com/docs) | `200 OK` | Interactive testing of all endpoints |
-| **Alternative Docs (ReDoc)** | [https://pond-catchment-backend.onrender.com/redoc](https://pond-catchment-backend.onrender.com/redoc) | `200 OK` | Schema & OpenAPI specification |
-| **Root Service Status** | [https://pond-catchment-backend.onrender.com/](https://pond-catchment-backend.onrender.com/) | `200 OK` | Service metadata and version |
-| **Health Check Endpoint** | [https://pond-catchment-backend.onrender.com/api/v1/health](https://pond-catchment-backend.onrender.com/api/v1/health) | `200 OK` | System liveness probe |
-| **Catchment Analysis Endpoint** | `POST https://pond-catchment-backend.onrender.com/api/v1/findCatchment` | `Active` | Production terrain & catchment pipeline |
+| **Interactive Web GIS Application** | [http://10.1.75.53:3309/app/](http://10.1.75.53:3309/app/) | `200 OK` | Interactive parcel selection & full results dashboard |
+| **Interactive API Docs (Swagger UI)** | [http://10.1.75.53:3309/docs](http://10.1.75.53:3309/docs) | `200 OK` | Interactive testing of all endpoints |
+| **Alternative Docs (ReDoc)** | [http://10.1.75.53:3309/redoc](http://10.1.75.53:3309/redoc) | `200 OK` | Schema & OpenAPI specification |
+| **Root Service Status** | [http://10.1.75.53:3309/](http://10.1.75.53:3309/) | `200 OK` | Service metadata and version |
+| **Health Check Endpoint** | [http://10.1.75.53:3309/api/v1/health](http://10.1.75.53:3309/api/v1/health) | `200 OK` | System liveness probe |
+| **Pond Site Analysis Endpoint** | `POST http://10.1.75.53:3309/api/v1/analyzePondSite` | `Active` | Unified DEM, hydrology, rainfall, & storage pipeline |
+| **Catchment Analysis Endpoint** | `POST http://10.1.75.53:3309/api/v1/findCatchment` | `Active` | KML/KMZ contour fallback pipeline |
 
 ---
 
@@ -136,10 +138,11 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Live Service & API Documentation:
-- **Interactive Swagger Documentation**: [https://pond-catchment-backend.onrender.com/docs](https://pond-catchment-backend.onrender.com/docs)
-- **ReDoc Documentation**: [https://pond-catchment-backend.onrender.com/redoc](https://pond-catchment-backend.onrender.com/redoc)
-- **Root Service Status**: [https://pond-catchment-backend.onrender.com/](https://pond-catchment-backend.onrender.com/)
-- **Health Check**: [https://pond-catchment-backend.onrender.com/api/v1/health](https://pond-catchment-backend.onrender.com/api/v1/health)
+- **Interactive Web App**: [http://10.1.75.53:3309/app/](http://10.1.75.53:3309/app/)
+- **Interactive Swagger Documentation**: [http://10.1.75.53:3309/docs](http://10.1.75.53:3309/docs)
+- **ReDoc Documentation**: [http://10.1.75.53:3309/redoc](http://10.1.75.53:3309/redoc)
+- **Root Service Status**: [http://10.1.75.53:3309/](http://10.1.75.53:3309/)
+- **Health Check**: [http://10.1.75.53:3309/api/v1/health](http://10.1.75.53:3309/api/v1/health)
 
 ---
 
@@ -611,7 +614,7 @@ pytest tests/ -v
 ### End-to-end workflow (automatic DEM path — no file upload)
 
 ```bash
-curl -X POST "https://pond-catchment-backend.onrender.com/api/v1/analyzePondSite" \
+curl -X POST "http://10.1.75.53:3309/api/v1/analyzePondSite" \
   -F 'request={"geometry": {"type": "Polygon", "coordinates": [[[81.290, 21.245], [81.296, 21.245], [81.296, 21.250], [81.290, 21.250], [81.290, 21.245]]]}}'
 ```
 
@@ -619,7 +622,7 @@ The response contains the selected-land metrics, acquired DEM source, terrain/co
 
 ### Frontend walkthrough
 
-1. Open `/app/` on the deployed service (or `http://localhost:8000/app/` locally).
+1. Open `http://10.1.75.53:3309/app/` on the deployed cluster (or `http://localhost:8000/app/` locally).
 2. Choose a basemap (OpenStreetMap or Esri satellite).
 3. Click **Draw polygon** and click (or double-click) vertices around the village land; press **Finish** to close (minimum 3 vertices).
 4. Click **Analyze selected area** — the loading state shows while the backend acquires the DEM, runs hydrology, fetches rainfall, and computes water volumes.
@@ -628,66 +631,62 @@ The response contains the selected-land metrics, acquired DEM source, terrain/co
 ### KML/KMZ fallback (backward compatibility)
 
 ```bash
-curl -X POST "https://pond-catchment-backend.onrender.com/api/v1/findCatchment" \
+curl -X POST "http://10.1.75.53:3309/api/v1/findCatchment" \
   -F "file=@data/sample/contours_1m.kml"
 ```
 
 ---
 
-## Deployment on Render (render.com)
+## Production Deployment (Load-Balanced Cluster)
 
-The repository is configured for automated deployment on [Render](https://render.com) as a Web Service.
+The application is deployed across a 4-node Linux server cluster fronted by an Nginx load balancer.
 
-### Option A: 1-Click Deployment via Blueprint (Recommended)
+### Architecture
 
-1. Push your repository to GitHub.
-2. Log in to [Render Dashboard](https://dashboard.render.com).
-3. Click **New +** -> **Blueprint**.
-4. Connect your GitHub repository.
-5. Render detects [render.yaml](file:///c:/CodingNest/pond_catchment_backend/render.yaml) and automatically configures:
-   - **Service Name**: `pond-catchment-backend`
-   - **Environment**: `Python` (`3.12.3` via [.python-version](file:///c:/CodingNest/pond_catchment_backend/.python-version))
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-   - **Health Check Path**: `/api/v1/health`
-6. Click **Apply**. Render will build and deploy the service.
+```text
+               Client Request
+                     │
+                     ▼
+          Nginx Load Balancer
+          (http://10.1.75.53:3309)
+                     │
+     ┌───────────────┼───────────────┬───────────────┐
+     ▼               ▼               ▼               ▼
+   sys1            sys2            sys3            sys4
+(:2309)         (:2310)         (:2311)         (:2312)
+172.17.0.51     172.17.0.5      172.17.0.95     172.17.0.50
+     │               │               │               │
+     └───────────────┼───────────────┴───────────────┘
+                     │
+                     ▼
+             Shared Redis Cache
+              (172.17.0.51:6379, DB 1)
+```
 
-### Option B: Manual Web Service Setup
+### Deployment Automation Tooling
 
-If setting up manually on Render:
-1. Click **New +** -> **Web Service**.
-2. Select your repository.
-3. Configure the following fields:
-   - **Name**: `pond-catchment-backend`
-   - **Language**: `Python`
-   - **Branch**: `main`
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-4. Under **Advanced**:
-   - **Health Check Path**: `/api/v1/health`
-   - **Environment Variables**:
-     - `PYTHON_VERSION`: `3.12.3`
-     - `PROJECT_NAME`: `Village Pond Planning System`
-     - `API_V1_STR`: `/api/v1`
-     - `DEBUG`: `false`
-5. Click **Create Web Service**.
+The cluster is managed via [`deploy/deploy_all.py`](file:///c:/CodingNest/pond_catchment_backend/deploy/deploy_all.py):
 
-### Option C: Docker Container Deployment
+1. **Full Release (`push` mode)**:
+   Bundles source files, distributes to all 4 nodes, runs `deploy/remote_setup.sh` with MD5 dependency caching (`.requirements.md5`), and starts/restarts daemons:
+   ```powershell
+   python deploy/deploy_all.py push
+   ```
+2. **Zero-Downtime Hot Sync (`sync` mode)**:
+   Transfers modified application files directly via SFTP and issues a `SIGHUP` reload to Gunicorn workers across all 4 nodes in $<4\text{ s}$ without dropping connections:
+   ```powershell
+   python deploy/deploy_all.py sync
+   ```
+3. **Cluster Health & Smoke Testing**:
+   ```powershell
+   python deploy/deploy_all.py status
+   python deploy/integration_test.py --url http://10.1.75.53:3309
+   ```
 
-The repository includes a production-ready [Dockerfile](file:///c:/CodingNest/pond_catchment_backend/Dockerfile).
-1. Click **New +** -> **Web Service**.
-2. Select your repository and choose **Docker** as the runtime.
-3. Render will build the container using the provided `Dockerfile` and launch Uvicorn on `$PORT`.
+### Live Server Endpoints
 
-### Live Deployed API Endpoints
-
-The API is actively running on Render:
-
-- **Health Check**: [https://pond-catchment-backend.onrender.com/api/v1/health](https://pond-catchment-backend.onrender.com/api/v1/health)
-- **Interactive Swagger Docs**: [https://pond-catchment-backend.onrender.com/docs](https://pond-catchment-backend.onrender.com/docs)
-- **ReDoc API Docs**: [https://pond-catchment-backend.onrender.com/redoc](https://pond-catchment-backend.onrender.com/redoc)
-- **Analyze Catchment (cURL)**:
-  ```bash
-  curl -X POST "https://pond-catchment-backend.onrender.com/api/v1/findCatchment" \
-    -F "file=@data/sample/contours_1m.kml"
-  ```
+- **Web Application**: [http://10.1.75.53:3309/app/](http://10.1.75.53:3309/app/)
+- **Interactive Swagger Docs**: [http://10.1.75.53:3309/docs](http://10.1.75.53:3309/docs)
+- **ReDoc API Docs**: [http://10.1.75.53:3309/redoc](http://10.1.75.53:3309/redoc)
+- **Health Check**: [http://10.1.75.53:3309/api/v1/health](http://10.1.75.53:3309/api/v1/health)
+- **Readiness Check**: [http://10.1.75.53:3309/api/v1/ready](http://10.1.75.53:3309/api/v1/ready)

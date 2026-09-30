@@ -6,7 +6,8 @@ or this file.
 
 Usage (from the repository root):
   python deploy/deploy_all.py bundle                 # build deploy bundle
-  python deploy/deploy_all.py push                   # upload+setup on all 4 nodes
+  python deploy/deploy_all.py sync                   # FAST: sync app code directly & reload in 2s (no pip)
+  python deploy/deploy_all.py push                   # full push: upload+setup on all 4 nodes
   python deploy/deploy_all.py nginx                  # install/reload pond nginx site (sys1)
   python deploy/deploy_all.py verify                 # check /version on all nodes + LB port
   python deploy/deploy_all.py stop-node <ssh_port>   # stop one node's daemon (failover test)
@@ -27,10 +28,10 @@ sys.path.insert(0, str(REPO_ROOT))
 from deploy.ssh_node import connect_with_retry  # noqa: E402
 
 NODES = [
-    {"ssh_port": 2309, "node_id": "sys1", "internal_ip": "172.17.0.110"},
-    {"ssh_port": 2310, "node_id": "sys2", "internal_ip": "172.17.0.111"},
-    {"ssh_port": 2311, "node_id": "sys3", "internal_ip": "172.17.0.112"},
-    {"ssh_port": 2312, "node_id": "sys4", "internal_ip": "172.17.0.113"},
+    {"ssh_port": 2309, "node_id": "sys1", "internal_ip": "172.17.0.51"},
+    {"ssh_port": 2310, "node_id": "sys2", "internal_ip": "172.17.0.5"},
+    {"ssh_port": 2311, "node_id": "sys3", "internal_ip": "172.17.0.95"},
+    {"ssh_port": 2312, "node_id": "sys4", "internal_ip": "172.17.0.50"},
 ]
 PROXY_NODE = NODES[0]
 REDIS_HOST = PROXY_NODE["internal_ip"]  # shared Redis discovered on sys1
@@ -189,15 +190,61 @@ def stop_start_node(password: str, ssh_port: int, action: str) -> None:
     client.close()
 
 
+def sync_app(password: str) -> None:
+    targets = NODES
+    print(f"Fast-syncing app/ directly to {len(targets)} nodes...")
+    app_dir = REPO_ROOT / "app"
+    
+    # Collect files to upload (skip __pycache__ and compiled artifacts)
+    files_to_sync = []
+    for root, dirs, files in os.walk(app_dir):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for f in files:
+            if not f.endswith((".pyc", ".pyo")):
+                local_path = Path(root) / f
+                rel_path = local_path.relative_to(REPO_ROOT).as_posix()
+                files_to_sync.append((local_path, rel_path))
+
+    for node in targets:
+        nid = node["node_id"]
+        port = node["ssh_port"]
+        print(f"[{nid}] syncing {len(files_to_sync)} files to port {port}...")
+        for attempt in range(3):
+            try:
+                client = connect_with_retry(password, port, attempts=3)
+                sftp = client.open_sftp()
+                for local_file, rel in files_to_sync:
+                    remote_file = f"/home/student/pond_catchment_backend/{rel}"
+                    remote_dir = os.path.dirname(remote_file)
+                    try:
+                        sftp.mkdir(remote_dir)
+                    except IOError:
+                        pass
+                    sftp.put(str(local_file), remote_file)
+                sftp.close()
+                cmd = "cd ~/pond_catchment_backend && kill -HUP $(cat gunicorn.pid) 2>/dev/null || true; sleep 1; curl -s --max-time 3 http://127.0.0.1:8000/api/v1/health"
+                _, out, _ = client.exec_command(cmd, timeout=10)
+                res = out.read().decode().strip()
+                print(f"[{nid}] Reloaded OK: {res}")
+                client.close()
+                break
+            except Exception as e:
+                print(f"[{nid}] Attempt {attempt+1} failed: {e}")
+                time.sleep(1.0)
+    print("Fast sync completed.")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["bundle", "push", "nginx", "verify", "stop-node", "start-node"])
+    parser.add_argument("command", choices=["bundle", "push", "sync", "nginx", "verify", "stop-node", "start-node"])
     parser.add_argument("ssh_port", nargs="?", type=int)
     args = parser.parse_args()
     password = os.environ["DEPLOY_SSH_PW"]
 
     if args.command == "bundle":
         build_bundle()
+    elif args.command == "sync":
+        sync_app(password)
     elif args.command == "push":
         commit = git_commit()
         bundle = build_bundle()

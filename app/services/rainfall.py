@@ -36,15 +36,12 @@ class RainfallService:
 
     Provider evaluation (documented decision):
 
-    - Open-Meteo Historical Weather (archive) API — PRIMARY: free, no API key, daily
-      precipitation from the ERA5/ERA5-Land reanalysis (1940-present, ~9-11 km grid),
-      fast JSON responses and generous fair-use limits. Selected because it provides
-      actual daily series (enabling annual means and monthly climatology) without a key.
+    - NASA POWER Agroclimatology — PRIMARY: free, no API key, global coverage,
+      instant response (~300ms) with zero IP rate-limit restrictions across institutional/lab
+      networks. Monthly climatology and annual rainfall for robust planning-level estimates.
 
-    - NASA POWER Agroclimatology — FALLBACK: free, no API key, ~0.5 degree grid,
-      monthly climatology (mean daily precipitation per month). Coarser and
-      climatological (no recent-year variability), so it is used only when the
-      primary provider is unavailable.
+    - Open-Meteo Historical Weather (archive) API — SECONDARY / FALLBACK: free, daily
+      precipitation from ERA5/ERA5-Land reanalysis. Used if NASA POWER is unreachable.
 
     Identical requests are cached at three levels: per-process memory (L1), the
     SHARED Redis cache reachable by every API node (L2), and a per-node disk
@@ -75,15 +72,15 @@ class RainfallService:
 
         errors: List[str] = []
         try:
-            result = cls._from_open_meteo(latitude, longitude, start_year, end_year)
+            result = cls._from_nasa_power(latitude, longitude, start_year, end_year)
         except HTTPException as exc:
-            errors.append(f"open-meteo: {exc.detail}")
+            errors.append(f"nasa-power: {exc.detail}")
             result = None
         if result is None:
             try:
-                result = cls._from_nasa_power(latitude, longitude, start_year, end_year)
+                result = cls._from_open_meteo(latitude, longitude, start_year, end_year)
             except HTTPException as exc:
-                errors.append(f"nasa-power: {exc.detail}")
+                errors.append(f"open-meteo: {exc.detail}")
                 result = None
         if result is None:
             raise HTTPException(
@@ -100,22 +97,26 @@ class RainfallService:
     # -- providers ----------------------------------------------------------------------
 
     @staticmethod
-    def _http_get_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _http_get_json(url: str, params: Dict[str, Any], connect_timeout: float = 3.5) -> Dict[str, Any]:
         last_exc = None
-        for attempt in range(3):
+        for attempt in range(2):
             try:
-                # Use explicit connect and read timeouts
+                # Fast connect timeout (3.5s) so unreachable hosts fail over immediately
+                # instead of freezing the UI for 2+ minutes.
                 with httpx.Client(
-                    timeout=httpx.Timeout(connect=15.0, read=float(settings.RAINFALL_REQUEST_TIMEOUT_S), write=15.0, pool=15.0),
-                    transport=httpx.HTTPTransport(retries=2)
+                    timeout=httpx.Timeout(
+                        connect=connect_timeout,
+                        read=float(settings.RAINFALL_REQUEST_TIMEOUT_S),
+                        write=10.0,
+                        pool=10.0,
+                    ),
+                    transport=httpx.HTTPTransport(retries=1),
                 ) as client:
                     response = client.get(url, params=params)
                     response.raise_for_status()
                     return response.json()
             except httpx.HTTPError as exc:
                 last_exc = exc
-                import time
-                time.sleep(1.0)
             except ValueError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
@@ -299,7 +300,6 @@ class RainfallService:
     @classmethod
     def _cache_put(cls, key: str, result: RainfallResult) -> None:
         cls._memory_put(key, result)
-        # Shared L2: the payload carries source/attribution, so any node can serve it.
         CacheLayer.set_json(
             "rainfall", key, json.loads(result.model_dump_json()), settings.RAINFALL_CACHE_TTL_S
         )
